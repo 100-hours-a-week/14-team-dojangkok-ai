@@ -1,0 +1,59 @@
+# --- Web ---
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1
+python-multipart==0.0.9
+requests==2.32.5
+
+# --- Validation ---
+pydantic==2.7.4
+
+# --- PDF ---
+pypdf==4.2.0
+PyMuPDF==1.24.9
+
+# --- LangChain stack ---
+langchain==0.2.17
+langchain-core==0.2.43
+langchain-community==0.2.17
+langchain-text-splitters==0.2.4
+langchain-openai==0.1.25
+langchain-chroma==0.1.4
+
+# --- LangGraph ---
+langgraph==0.1.15
+
+# --- Vector DB ---
+chromadb==0.5.3
+tiktoken==0.7.0
+
+# --- Redis (Pub/Sub + Hash 상태 저장) ---
+redis==5.0.8
+
+# --- HuggingFace (Base model + LoRA adapter) ---
+transformers==4.44.2
+huggingface-hub==0.24.6
+peft==0.13.0
+accelerate==0.34.2
+safetensors==0.4.5
+bitsandbytes==0.41.0
+
+# --- Datasets / Evaluation (QLoRA fine-tuning) ---
+datasets==2.17.1
+evaluate==0.4.0
+trl==0.9.2
+
+# --- Torch (CPU/GPU) ---
+torch==2.4.1
+
+# --- GCP ---
+google-cloud-storage==2.18.2
+
+# --- Dev ---
+ruff==0.6.9
+
+# --- beautiful soup ---
+beautifulsoup4==4.14.3
+lxml==6.0.2
+soupsieve==2.8.2
+
