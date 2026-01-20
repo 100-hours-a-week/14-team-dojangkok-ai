@@ -1,0 +1,189 @@
+# AI Server CD Pipeline
+# 위치: .github/workflows/ai-cd.yml
+#
+# 트리거: 수동 (workflow_dispatch)
+# 인증: GCP Workload Identity Federation (OIDC)
+# 배포: In-place 배포 (VM 직접 업데이트)
+
+name: AI Server CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '배포를 진행하시겠습니까? (yes 입력)'
+        required: true
+        type: string
+
+env:
+  PYTHON_VERSION: "3.10"
+  GCP_PROJECT_ID: "fiery-topic-483322-b2"
+  GCP_ZONE: "asia-northeast3-b"
+  GCP_INSTANCE: "ai-server"
+  WORKLOAD_IDENTITY_PROVIDER: "projects/7174586152/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+  SERVICE_ACCOUNT: "github-actions-sa@fiery-topic-483322-b2.iam.gserviceaccount.com"
+
+jobs:
+  # ============================================
+  # Validation
+  # ============================================
+  validate:
+    name: Validate Input
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check Confirmation
+        if: ${{ github.event.inputs.confirm != 'yes' }}
+        run: |
+          echo "배포가 취소되었습니다. 'yes'를 입력해주세요."
+          exit 1
+
+  # ============================================
+  # Deploy
+  # ============================================
+  deploy:
+    name: Deploy to GCP
+    runs-on: ubuntu-22.04
+    needs: validate
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (OIDC)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Download Latest Artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 최신 성공한 CI run에서 artifact 다운로드
+          mkdir -p ./artifact
+
+          # main 브랜치의 최신 성공한 워크플로우 실행 찾기
+          RUN_ID=$(gh run list \
+            --workflow="AI Server CI" \
+            --branch=main \
+            --status=success \
+            --limit=1 \
+            --json databaseId \
+            --jq '.[0].databaseId')
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful CI run found"
+            exit 1
+          fi
+
+          echo "Downloading artifact from run: $RUN_ID"
+          gh run download "$RUN_ID" --dir ./artifact
+
+      - name: Find Artifact File
+        id: artifact
+        run: |
+          ARTIFACT_FILE=$(find ./artifact -name "*.tar.gz" | head -1)
+          if [ -z "$ARTIFACT_FILE" ]; then
+            echo "Artifact not found"
+            exit 1
+          fi
+          echo "file=$ARTIFACT_FILE" >> $GITHUB_OUTPUT
+          echo "Artifact found: $ARTIFACT_FILE"
+
+      - name: Upload Artifact to VM
+        run: |
+          gcloud compute scp ${{ steps.artifact.outputs.file }} \
+            ${{ env.GCP_INSTANCE }}:/tmp/ai-server-deploy.tar.gz \
+            --zone=${{ env.GCP_ZONE }}
+
+      - name: Deploy on VM
+        run: |
+          gcloud compute ssh ${{ env.GCP_INSTANCE }} \
+            --zone=${{ env.GCP_ZONE }} \
+            --command='
+              set -e
+
+              # 백업 생성
+              BACKUP_DIR="/app/ai-server-backup-$(date +%Y%m%d%H%M%S)"
+              if [ -d "/app/ai-server" ]; then
+                sudo cp -r /app/ai-server "$BACKUP_DIR"
+                echo "Backup created: $BACKUP_DIR"
+              fi
+
+              # 서비스 중단
+              sudo systemctl stop ai-server || true
+              echo "Service stopped"
+
+              # 배포
+              sudo mkdir -p /app/ai-server
+              sudo tar -xzf /tmp/ai-server-deploy.tar.gz -C /app/ai-server
+              sudo chown -R jsh:jsh /app/ai-server
+              echo "Artifact deployed"
+
+              # 서비스 시작
+              sudo systemctl start ai-server
+              echo "Service started"
+
+              # 임시 파일 정리
+              rm -f /tmp/ai-server-deploy.tar.gz
+            '
+
+      - name: Health Check
+        id: healthcheck
+        run: |
+          # VM 외부 IP 조회
+          EXTERNAL_IP=$(gcloud compute instances describe ${{ env.GCP_INSTANCE }} \
+            --zone=${{ env.GCP_ZONE }} \
+            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+
+          echo "Health check started: http://$EXTERNAL_IP:8000/health"
+
+          # 최대 60초 대기 (5초 간격, 12회 시도)
+          for i in {1..12}; do
+            if curl -s -f "http://$EXTERNAL_IP:8000/health" > /dev/null; then
+              echo "Health check passed"
+              echo "status=success" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Attempt $i/12 - Waiting for server..."
+            sleep 5
+          done
+
+          echo "Health check failed"
+          echo "status=failed" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Rollback on Failure
+        if: failure() && steps.healthcheck.outputs.status == 'failed'
+        run: |
+          gcloud compute ssh ${{ env.GCP_INSTANCE }} \
+            --zone=${{ env.GCP_ZONE }} \
+            --command='
+              set -e
+
+              # 최신 백업 찾기
+              LATEST_BACKUP=$(ls -td /app/ai-server-backup-* 2>/dev/null | head -1)
+
+              if [ -n "$LATEST_BACKUP" ]; then
+                echo "Rollback started: $LATEST_BACKUP"
+
+                sudo systemctl stop ai-server || true
+                sudo rm -rf /app/ai-server
+                sudo mv "$LATEST_BACKUP" /app/ai-server
+                sudo systemctl start ai-server
+
+                echo "Rollback completed"
+              else
+                echo "Backup not found"
+                exit 1
+              fi
+            '
