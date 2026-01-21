@@ -135,8 +135,8 @@ jobs:
               sudo python3 -m venv venv
               sudo chown -R jsh:jsh /app/ai-server
               echo "venv created"
-              /app/ai-server/venv/bin/pip install --upgrade pip -q
-              /app/ai-server/venv/bin/pip install -r requirements.txt -q
+              sudo /app/ai-server/venv/bin/pip install --upgrade pip -q
+              sudo /app/ai-server/venv/bin/pip install -r requirements.txt -q
               echo "Dependencies installed"
 
               # 서비스 시작
