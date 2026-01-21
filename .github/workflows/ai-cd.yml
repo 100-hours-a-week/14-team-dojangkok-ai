@@ -16,7 +16,6 @@ on:
         type: string
 
 env:
-  PYTHON_VERSION: "3.10"
   GCP_PROJECT_ID: "fiery-topic-483322-b2"
   GCP_ZONE: "asia-northeast3-b"
   GCP_INSTANCE: "ai-server"
@@ -24,36 +23,16 @@ env:
   SERVICE_ACCOUNT: "github-actions-sa@fiery-topic-483322-b2.iam.gserviceaccount.com"
 
 jobs:
-  # ============================================
-  # Validation
-  # ============================================
-  validate:
-    name: Validate Input
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Check Confirmation
-        if: ${{ github.event.inputs.confirm != 'yes' }}
-        run: |
-          echo "배포가 취소되었습니다. 'yes'를 입력해주세요."
-          exit 1
-
-  # ============================================
-  # Deploy
-  # ============================================
   deploy:
     name: Deploy to GCP
     runs-on: ubuntu-22.04
-    needs: validate
+    if: ${{ github.event.inputs.confirm == 'yes' }}
     permissions:
       contents: read
       id-token: write
       actions: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Authenticate to GCP (OIDC)
-        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
@@ -64,15 +43,15 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      - name: Download Latest Artifact
+      - name: Download Artifact
+        id: artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 최신 성공한 CI run에서 artifact 다운로드
           mkdir -p ./artifact
 
-          # main 브랜치의 최신 성공한 워크플로우 실행 찾기
           RUN_ID=$(gh run list \
+            --repo ${{ github.repository }} \
             --workflow="AI Server CI" \
             --branch=main \
             --status=success \
@@ -86,85 +65,90 @@ jobs:
           fi
 
           echo "Downloading artifact from run: $RUN_ID"
-          gh run download "$RUN_ID" --dir ./artifact
+          gh run download "$RUN_ID" --repo ${{ github.repository }} --dir ./artifact
 
-      - name: Find Artifact File
-        id: artifact
-        run: |
           ARTIFACT_FILE=$(find ./artifact -name "*.tar.gz" | head -1)
           if [ -z "$ARTIFACT_FILE" ]; then
             echo "Artifact not found"
             exit 1
           fi
           echo "file=$ARTIFACT_FILE" >> $GITHUB_OUTPUT
-          echo "Artifact found: $ARTIFACT_FILE"
 
-      - name: Upload Artifact to VM
+      - name: Deploy to VM
         run: |
+          # Artifact 전송
           gcloud compute scp ${{ steps.artifact.outputs.file }} \
             ${{ env.GCP_INSTANCE }}:/tmp/ai-server-deploy.tar.gz \
             --zone=${{ env.GCP_ZONE }}
 
-      - name: Deploy on VM
-        run: |
+          # VM에서 배포 실행
           gcloud compute ssh ${{ env.GCP_INSTANCE }} \
             --zone=${{ env.GCP_ZONE }} \
             --command='
               set -e
 
-              # 백업 생성
+              # 백업 생성 (최근 3개만 유지)
               BACKUP_DIR="/app/ai-server-backup-$(date +%Y%m%d%H%M%S)"
               if [ -d "/app/ai-server" ]; then
                 sudo cp -r /app/ai-server "$BACKUP_DIR"
                 echo "Backup created: $BACKUP_DIR"
+                # 오래된 백업 정리
+                ls -dt /app/ai-server-backup-* 2>/dev/null | tail -n +4 | xargs -r sudo rm -rf
               fi
 
               # 서비스 중단
               sudo systemctl stop ai-server || true
-              echo "Service stopped"
 
               # 배포
               sudo mkdir -p /app/ai-server
               sudo tar -xzf /tmp/ai-server-deploy.tar.gz -C /app/ai-server
-              sudo chown -R jsh:jsh /app/ai-server
-              echo "Artifact deployed"
 
-              # venv 생성 및 dependencies 설치
+              # venv 설정 (requirements.txt 변경 시에만 재설치)
               cd /app/ai-server
-              sudo rm -rf venv
-              sudo python3 -m venv venv
+              NEW_HASH=$(md5sum requirements.txt | cut -d" " -f1)
+              OLD_HASH=""
+              if [ -f "venv/.requirements_hash" ]; then
+                OLD_HASH=$(cat venv/.requirements_hash)
+              fi
+
+              if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -d "venv" ]; then
+                echo "Requirements changed or venv missing, installing..."
+                sudo rm -rf venv
+                sudo python3 -m venv venv
+                sudo /app/ai-server/venv/bin/pip install --upgrade pip -q
+                sudo /app/ai-server/venv/bin/pip install -r requirements.txt -q
+                echo "$NEW_HASH" | sudo tee venv/.requirements_hash > /dev/null
+                echo "Dependencies installed"
+              else
+                echo "Requirements unchanged, skipping venv setup"
+              fi
+
+              # 권한 설정
               sudo chown -R jsh:jsh /app/ai-server
-              echo "venv created"
-              sudo /app/ai-server/venv/bin/pip install --upgrade pip -q
-              sudo /app/ai-server/venv/bin/pip install -r requirements.txt -q
-              echo "Dependencies installed"
 
               # 서비스 시작
               sudo systemctl start ai-server
-              echo "Service started"
 
-              # 임시 파일 정리
+              # 정리
               rm -f /tmp/ai-server-deploy.tar.gz
             '
 
       - name: Health Check
         id: healthcheck
         run: |
-          # VM 외부 IP 조회
           EXTERNAL_IP=$(gcloud compute instances describe ${{ env.GCP_INSTANCE }} \
             --zone=${{ env.GCP_ZONE }} \
             --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
 
-          echo "Health check started: http://$EXTERNAL_IP:8000/health"
+          echo "Health check: http://$EXTERNAL_IP:8000/health"
 
-          # 최대 60초 대기 (5초 간격, 12회 시도)
           for i in {1..12}; do
             if curl -s -f "http://$EXTERNAL_IP:8000/health" > /dev/null; then
               echo "Health check passed"
               echo "status=success" >> $GITHUB_OUTPUT
               exit 0
             fi
-            echo "Attempt $i/12 - Waiting for server..."
+            echo "Attempt $i/12 - Waiting..."
             sleep 5
           done
 
@@ -179,21 +163,17 @@ jobs:
             --zone=${{ env.GCP_ZONE }} \
             --command='
               set -e
-
-              # 최신 백업 찾기
               LATEST_BACKUP=$(ls -td /app/ai-server-backup-* 2>/dev/null | head -1)
 
               if [ -n "$LATEST_BACKUP" ]; then
-                echo "Rollback started: $LATEST_BACKUP"
-
+                echo "Rolling back to: $LATEST_BACKUP"
                 sudo systemctl stop ai-server || true
                 sudo rm -rf /app/ai-server
                 sudo mv "$LATEST_BACKUP" /app/ai-server
                 sudo systemctl start ai-server
-
                 echo "Rollback completed"
               else
-                echo "Backup not found"
+                echo "No backup found"
                 exit 1
               fi
             '
