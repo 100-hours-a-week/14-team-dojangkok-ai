@@ -132,8 +132,8 @@ jobs:
               # venv 생성 및 dependencies 설치
               cd /app/ai-server
               sudo rm -rf venv
-              python3 -m venv venv
-              sudo chown -R jsh:jsh venv
+              sudo python3 -m venv venv
+              sudo chown -R jsh:jsh /app/ai-server
               echo "venv created"
               /app/ai-server/venv/bin/pip install --upgrade pip -q
               /app/ai-server/venv/bin/pip install -r requirements.txt -q
