@@ -1,19 +1,17 @@
 # AI Server CD Pipeline
 # 위치: .github/workflows/ai-cd.yml
 #
-# 트리거: 수동 (workflow_dispatch)
+# 트리거: main 브랜치 push (자동), 수동 (workflow_dispatch)
 # 인증: GCP Workload Identity Federation (OIDC)
 # 배포: In-place 배포 (VM 직접 업데이트)
 
 name: AI Server CD
 
 on:
+  pull_request:
+    types: [closed]
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      confirm:
-        description: '배포를 진행하시겠습니까? (yes 입력)'
-        required: true
-        type: string
 
 env:
   GCP_PROJECT_ID: "fiery-topic-483322-b2"
@@ -26,7 +24,7 @@ jobs:
   deploy:
     name: Deploy to GCP
     runs-on: ubuntu-22.04
-    if: ${{ github.event.inputs.confirm == 'yes' }}
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
       id-token: write
