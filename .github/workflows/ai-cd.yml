@@ -129,6 +129,16 @@ jobs:
               sudo chown -R jsh:jsh /app/ai-server
               echo "Artifact deployed"
 
+              # venv 생성 및 dependencies 설치
+              cd /app/ai-server
+              if [ ! -d "venv" ]; then
+                python3 -m venv venv
+                echo "venv created"
+              fi
+              /app/ai-server/venv/bin/pip install --upgrade pip -q
+              /app/ai-server/venv/bin/pip install -r requirements.txt -q
+              echo "Dependencies installed"
+
               # 서비스 시작
               sudo systemctl start ai-server
               echo "Service started"
