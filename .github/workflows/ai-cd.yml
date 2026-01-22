@@ -25,6 +25,7 @@ jobs:
   deploy:
     name: Deploy to GCP
     runs-on: ubuntu-22.04
+    environment: 1-bigbang
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
