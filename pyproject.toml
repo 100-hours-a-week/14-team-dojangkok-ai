@@ -1,0 +1,75 @@
+[project]
+name = "14-team-dojangkok-ai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate==0.34.2",
+    "beautifulsoup4==4.14.3",
+    "bitsandbytes==0.41.0",
+    "chromadb==0.5.3",
+    "datasets==2.17.1",
+    "evaluate==0.4.0",
+    "fastapi==0.110.0",
+    "google-cloud-storage==2.18.2",
+    "huggingface-hub==0.24.6",
+    "langchain==0.2.17",
+    "langchain-chroma==0.1.4",
+    "langchain-community==0.2.17",
+    "langchain-core==0.2.43",
+    "langchain-openai==0.1.25",
+    "langchain-text-splitters==0.2.4",
+    "langgraph==0.1.15",
+    "lxml==6.0.2",
+    "numpy==1.26.4",
+    "peft==0.13.0",
+    "pydantic==2.8.0",
+    "pymupdf==1.24.9",
+    "pypdf==4.2.0",
+    "python-dotenv==1.0.1",
+    "python-multipart==0.0.9",
+    "redis==5.0.8",
+    "requests==2.32.5",
+    "safetensors==0.4.5",
+    "soupsieve==2.8.2",
+    "tiktoken==0.7.0",
+    "torch==2.4.0",
+    "transformers==4.44.2",
+    "trl==0.9.2",
+    "uvicorn[standard]==0.29.0",
+    "vllm==0.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.6.9",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [
+  ".git",
+  ".github",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".ruff_cache",
+  "dist",
+  "build",
+]
+
+[tool.ruff.lint]
+select = ["E","W","F","I","B","C4","UP"]
+ignore = ["E501","B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
