@@ -121,7 +121,7 @@ jobs:
               if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -d ".venv" ]; then
                 echo "uv.lock changed or .venv missing, installing..."
                 sudo rm -rf .venv
-                sudo -E uv sync --frozen
+                sudo $HOME/.local/bin/uv sync --frozen
                 echo "$NEW_HASH" | sudo tee .venv/.uv_lock_hash > /dev/null
                 echo "Dependencies installed"
               else
