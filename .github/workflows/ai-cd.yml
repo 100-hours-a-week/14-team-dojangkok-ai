@@ -13,13 +13,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-env:
-  GCP_PROJECT_ID: "fiery-topic-483322-b2"
-  GCP_ZONE: "asia-northeast3-b"
-  GCP_INSTANCE: "ai-server"
-  WORKLOAD_IDENTITY_PROVIDER: "projects/7174586152/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
-  SERVICE_ACCOUNT: "github-actions-sa@fiery-topic-483322-b2.iam.gserviceaccount.com"
-
 jobs:
   deploy:
     name: Deploy to GCP
@@ -33,13 +26,13 @@ jobs:
       - name: Authenticate to GCP (OIDC)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Setup gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Download Artifact
         id: artifact
@@ -76,12 +69,12 @@ jobs:
         run: |
           # Artifact 전송
           gcloud compute scp ${{ steps.artifact.outputs.file }} \
-            ${{ env.GCP_INSTANCE }}:/tmp/ai-server-deploy.tar.gz \
-            --zone=${{ env.GCP_ZONE }}
+            ${{ secrets.GCP_INSTANCE }}:/tmp/ai-server-deploy.tar.gz \
+            --zone=${{ secrets.GCP_ZONE }}
 
           # VM에서 배포 실행
-          gcloud compute ssh ${{ env.GCP_INSTANCE }} \
-            --zone=${{ env.GCP_ZONE }} \
+          gcloud compute ssh ${{ secrets.GCP_INSTANCE }} \
+            --zone=${{ secrets.GCP_ZONE }} \
             --command='
               set -e
 
@@ -134,8 +127,8 @@ jobs:
       - name: Health Check
         id: healthcheck
         run: |
-          EXTERNAL_IP=$(gcloud compute instances describe ${{ env.GCP_INSTANCE }} \
-            --zone=${{ env.GCP_ZONE }} \
+          EXTERNAL_IP=$(gcloud compute instances describe ${{ secrets.GCP_INSTANCE }} \
+            --zone=${{ secrets.GCP_ZONE }} \
             --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
 
           echo "Health check: http://$EXTERNAL_IP:8000/health"
@@ -157,8 +150,8 @@ jobs:
       - name: Rollback on Failure
         if: failure() && steps.healthcheck.outputs.status == 'failed'
         run: |
-          gcloud compute ssh ${{ env.GCP_INSTANCE }} \
-            --zone=${{ env.GCP_ZONE }} \
+          gcloud compute ssh ${{ secrets.GCP_INSTANCE }} \
+            --zone=${{ secrets.GCP_ZONE }} \
             --command='
               set -e
               LATEST_BACKUP=$(ls -td /app/ai-server-backup-* 2>/dev/null | head -1)
