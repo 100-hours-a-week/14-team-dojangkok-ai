@@ -43,6 +43,20 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
+      - name: Get Runner IP
+        id: ip
+        run: echo "ip=$(curl -s ifconfig.me)" >> $GITHUB_OUTPUT
+
+      - name: Add Firewall Rule
+        run: |
+          gcloud compute firewall-rules create github-actions-temp-${{ github.run_id }} \
+            --allow=tcp:22 \
+            --source-ranges=${{ steps.ip.outputs.ip }}/32 \
+            --target-tags=ai-server \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --description="Temporary rule for GitHub Actions CD"
+          echo "Firewall rule created for IP: ${{ steps.ip.outputs.ip }}"
+
       - name: Download Artifact
         id: artifact
         env:
@@ -182,3 +196,11 @@ jobs:
                 exit 1
               fi
             '
+
+      - name: Remove Firewall Rule
+        if: always()
+        run: |
+          gcloud compute firewall-rules delete github-actions-temp-${{ github.run_id }} \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --quiet || true
+          echo "Firewall rule removed"
