@@ -6,6 +6,8 @@
 #   - Push dev: lint, test, build
 #   - PR dev/hotfix/* → main: lint, test, build
 #   - Push main: artifact
+#
+# 패키지 관리: uv (pyproject.toml + uv.lock)
 
 name: AI Server CI
 
@@ -37,19 +39,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - name: Install Ruff
-        run: pip install ruff
+      - name: Install Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --only-dev
 
       - name: Run Ruff Linter
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Run Ruff Formatter Check
-        run: ruff format --check .
+        run: uv run ruff format --check .
 
   # ============================================
   # Test (pytest)
@@ -62,23 +68,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install pytest pytest-cov
+      - name: Install Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
 
       - name: Run Tests
         run: |
           if [ -d "tests" ]; then
-            pytest tests/ -v --cov=. --cov-report=xml
+            uv run pytest tests/ -v --cov=. --cov-report=xml
           else
             echo "No tests directory found, skipping tests"
           fi
@@ -98,21 +103,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Install Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev
 
       - name: Verify Build
         run: |
           # Python 문법 검증
-          python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" -not -path "./venv/*" 2>/dev/null || echo "")
+          uv run python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" -not -path "./venv/*" 2>/dev/null || echo "")
           echo "Build verification completed"
 
   # ============================================
@@ -128,21 +134,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
       - name: Create Artifact
         run: |
           mkdir -p dist
-          # 소스코드 패키징
+          # 소스코드 패키징 (의존성 제외)
           tar -czvf dist/ai-server-${{ github.sha }}.tar.gz \
             --exclude='.git' \
             --exclude='.github' \
