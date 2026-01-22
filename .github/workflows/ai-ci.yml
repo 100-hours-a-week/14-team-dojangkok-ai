@@ -2,9 +2,9 @@
 # 위치: .github/workflows/ai-ci.yml
 #
 # 트리거 매트릭스:
-#   - PR feat/* → dev: lint, test
-#   - Push dev: lint, test, build
-#   - PR dev/hotfix/* → main: lint, test, build
+#   - PR feat/* → dev: lint-test
+#   - Push dev: lint-test, build
+#   - PR dev/hotfix/* → main: lint-test, build
 #   - Push main: artifact
 #
 # 패키지 관리: uv (pyproject.toml + uv.lock)
@@ -30,40 +30,11 @@ env:
 
 jobs:
   # ============================================
-  # Lint (Ruff)
+  # Lint & Test
   # ============================================
-  lint:
-    name: Lint
+  lint-test:
+    name: Lint & Test
     runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Install Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
-      - name: Install dev dependencies
-        run: uv sync --frozen --only-dev
-
-      - name: Run Ruff Linter
-        run: uv run ruff check .
-
-      - name: Run Ruff Formatter Check
-        run: uv run ruff format --check .
-
-  # ============================================
-  # Test (pytest)
-  # ============================================
-  test:
-    name: Test
-    runs-on: ubuntu-22.04
-    needs: lint
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,6 +51,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Run Ruff Linter
+        run: uv run ruff check .
+
+      - name: Run Ruff Formatter Check
+        run: uv run ruff format --check .
+
       - name: Run Tests
         run: |
           if [ -d "tests" ]; then
@@ -95,7 +72,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-22.04
-    needs: test
+    needs: lint-test
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
       (github.event_name == 'pull_request' && github.base_ref == 'main')
@@ -128,7 +105,7 @@ jobs:
   artifact:
     name: Upload Artifact
     runs-on: ubuntu-22.04
-    needs: test
+    needs: lint-test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout
@@ -155,24 +132,3 @@ jobs:
           name: ai-server-${{ github.sha }}
           path: dist/
           retention-days: 7
-
-  # ============================================
-  # Discord Notification (Optional)
-  # ============================================
-  # notify:
-  #   name: Discord Notification
-  #   runs-on: ubuntu-22.04
-  #   needs: [lint, test, build]
-  #   if: always() && (needs.lint.result == 'failure' || needs.test.result == 'failure' || needs.build.result == 'failure')
-  #   steps:
-  #     - name: Discord Notification
-  #       uses: sarisia/actions-status-discord@v1
-  #       with:
-  #         webhook: ${{ secrets.DISCORD_WEBHOOK }}
-  #         title: "AI Server CI 실패"
-  #         description: |
-  #           **Branch**: ${{ github.ref_name }}
-  #           **Commit**: ${{ github.event.head_commit.message || github.event.pull_request.title }}
-  #           **Author**: ${{ github.actor }}
-  #         color: 0xff0000
-  #         username: "GitHub Actions"
