@@ -1,9 +1,10 @@
 # AI Server CD Pipeline
 # 위치: .github/workflows/ai-cd.yml
 #
-# 트리거: main 브랜치 push (자동), 수동 (workflow_dispatch)
+# 트리거: main 브랜치 PR 머지 (자동), 수동 (workflow_dispatch)
 # 인증: GCP Workload Identity Federation (OIDC)
 # 배포: In-place 배포 (VM 직접 업데이트)
+# 패키지 관리: uv (pyproject.toml + uv.lock)
 
 name: AI Server CD
 
@@ -14,11 +15,11 @@ on:
   workflow_dispatch:
 
 env:
-  GCP_PROJECT_ID: "fiery-topic-483322-b2"
-  GCP_ZONE: "asia-northeast3-b"
-  GCP_INSTANCE: "ai-server"
-  WORKLOAD_IDENTITY_PROVIDER: "projects/7174586152/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
-  SERVICE_ACCOUNT: "github-actions-sa@fiery-topic-483322-b2.iam.gserviceaccount.com"
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_ZONE: ${{ secrets.GCP_ZONE }}
+  GCP_INSTANCE: ${{ secrets.GCP_INSTANCE }}
+  WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+  SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
 jobs:
   deploy:
@@ -85,6 +86,13 @@ jobs:
             --command='
               set -e
 
+              # uv 설치 (없는 경우)
+              if ! command -v uv &> /dev/null; then
+                echo "Installing uv..."
+                curl -LsSf https://astral.sh/uv/install.sh | sh
+              fi
+              export PATH="$HOME/.local/bin:$PATH"
+
               # 백업 생성 (최근 3개만 유지)
               BACKUP_DIR="/app/ai-server-backup-$(date +%Y%m%d%H%M%S)"
               if [ -d "/app/ai-server" ]; then
@@ -101,24 +109,22 @@ jobs:
               sudo mkdir -p /app/ai-server
               sudo tar -xzf /tmp/ai-server-deploy.tar.gz -C /app/ai-server
 
-              # venv 설정 (requirements.txt 변경 시에만 재설치)
+              # uv sync (uv.lock 변경 시에만 재설치)
               cd /app/ai-server
-              NEW_HASH=$(md5sum requirements.txt | cut -d" " -f1)
+              NEW_HASH=$(md5sum uv.lock | cut -d" " -f1)
               OLD_HASH=""
-              if [ -f "venv/.requirements_hash" ]; then
-                OLD_HASH=$(cat venv/.requirements_hash)
+              if [ -f ".venv/.uv_lock_hash" ]; then
+                OLD_HASH=$(cat .venv/.uv_lock_hash)
               fi
 
-              if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -d "venv" ]; then
-                echo "Requirements changed or venv missing, installing..."
-                sudo rm -rf venv
-                sudo python3 -m venv venv
-                sudo /app/ai-server/venv/bin/pip install --upgrade pip -q
-                sudo /app/ai-server/venv/bin/pip install -r requirements.txt -q
-                echo "$NEW_HASH" | sudo tee venv/.requirements_hash > /dev/null
+              if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -d ".venv" ]; then
+                echo "uv.lock changed or .venv missing, installing..."
+                sudo rm -rf .venv
+                sudo -E uv sync --frozen
+                echo "$NEW_HASH" | sudo tee .venv/.uv_lock_hash > /dev/null
                 echo "Dependencies installed"
               else
-                echo "Requirements unchanged, skipping venv setup"
+                echo "uv.lock unchanged, skipping dependency install"
               fi
 
               # 권한 설정
