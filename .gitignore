@@ -17,13 +17,13 @@ venv/
 env/
 env_*/
 .env/
-.python-version
 
 # ===============================
 # Environment Variables
 # ===============================
 .env
 .env.*
+!.env.example
 
 # ===============================
 # FastAPI / Uvicorn
