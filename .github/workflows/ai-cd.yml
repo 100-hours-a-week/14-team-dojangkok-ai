@@ -94,10 +94,10 @@ jobs:
               fi
               export PATH="$HOME/.local/bin:$PATH"
 
-              # 백업 생성 (최근 3개만 유지)
+              # 백업 생성 (최근 3개만 유지, venv 제외)
               BACKUP_DIR="/app/ai-server-backup-$(date +%Y%m%d%H%M%S)"
               if [ -d "/app/ai-server" ]; then
-                sudo cp -r /app/ai-server "$BACKUP_DIR"
+                sudo rsync -a --exclude='venv' --exclude='.venv' /app/ai-server/ "$BACKUP_DIR/"
                 echo "Backup created: $BACKUP_DIR"
                 # 오래된 백업 정리
                 ls -dt /app/ai-server-backup-* 2>/dev/null | tail -n +4 | xargs -r sudo rm -rf
