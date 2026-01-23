@@ -25,6 +25,7 @@ jobs:
   deploy:
     name: Deploy to GCP
     runs-on: ubuntu-22.04
+    environment: 1-bigbang
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -142,7 +143,7 @@ jobs:
               fi
 
               # 권한 설정
-              sudo chown -R jsh:jsh /app/ai-server
+              sudo chown -R $(whoami):$(whoami) /app/ai-server
 
               # 서비스 시작
               sudo systemctl start ai-server
