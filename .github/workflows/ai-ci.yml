@@ -58,30 +58,6 @@ jobs:
       - name: Run Ruff Formatter Check
         run: ruff format --check . || echo "::warning::Format issues found (non-blocking)"
 
-  # ============================================
-  # Test (pytest)
-  # ============================================
-  test:
-    name: Test
-    runs-on: ubuntu-22.04
-    needs: lint
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
-          pip install pytest pytest-cov
-
       - name: Run Tests
         run: |
           if [ -d "tests" ]; then
