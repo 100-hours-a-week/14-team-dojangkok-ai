@@ -12,6 +12,7 @@
 name: AI Server CI
 
 on:
+  workflow_dispatch:  # 수동 실행
   push:
     branches: [main, dev]
     paths-ignore:
