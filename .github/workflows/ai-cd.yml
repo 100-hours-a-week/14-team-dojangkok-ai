@@ -1,9 +1,10 @@
 # AI Server CD Pipeline
 # 위치: .github/workflows/ai-cd.yml
 #
-# 트리거: main 브랜치 push (자동), 수동 (workflow_dispatch)
+# 트리거: main 브랜치 PR 머지 (자동), 수동 (workflow_dispatch)
 # 인증: GCP Workload Identity Federation (OIDC)
 # 배포: In-place 배포 (VM 직접 업데이트)
+# 패키지 관리: uv (pyproject.toml + uv.lock)
 
 name: AI Server CD
 
@@ -34,6 +35,20 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Get Runner IP
+        id: ip
+        run: echo "ip=$(curl -s ifconfig.me)" >> $GITHUB_OUTPUT
+
+      - name: Add Firewall Rule
+        run: |
+          gcloud compute firewall-rules create github-actions-temp-${{ github.run_id }} \
+            --allow=tcp:22 \
+            --source-ranges=${{ steps.ip.outputs.ip }}/32 \
+            --target-tags=ai-server \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --description="Temporary rule for GitHub Actions CD"
+          echo "Firewall rule created for IP: ${{ steps.ip.outputs.ip }}"
 
       - name: Download Artifact
         id: artifact
@@ -79,10 +94,17 @@ jobs:
             --command='
               set -e
 
-              # 백업 생성 (최근 3개만 유지)
+              # uv 설치 (없는 경우)
+              if ! command -v uv &> /dev/null; then
+                echo "Installing uv..."
+                curl -LsSf https://astral.sh/uv/install.sh | sh
+              fi
+              export PATH="$HOME/.local/bin:$PATH"
+
+              # 백업 생성 (최근 3개만 유지, venv 제외)
               BACKUP_DIR="/app/ai-server-backup-$(date +%Y%m%d%H%M%S)"
               if [ -d "/app/ai-server" ]; then
-                sudo cp -r /app/ai-server "$BACKUP_DIR"
+                sudo rsync -a --exclude='venv' --exclude='.venv' /app/ai-server/ "$BACKUP_DIR/"
                 echo "Backup created: $BACKUP_DIR"
                 # 오래된 백업 정리
                 ls -dt /app/ai-server-backup-* 2>/dev/null | tail -n +4 | xargs -r sudo rm -rf
@@ -95,24 +117,22 @@ jobs:
               sudo mkdir -p /app/ai-server
               sudo tar -xzf /tmp/ai-server-deploy.tar.gz -C /app/ai-server
 
-              # venv 설정 (requirements.txt 변경 시에만 재설치)
+              # uv sync (uv.lock 변경 시에만 재설치)
               cd /app/ai-server
-              NEW_HASH=$(md5sum requirements.txt | cut -d" " -f1)
+              NEW_HASH=$(md5sum uv.lock | cut -d" " -f1)
               OLD_HASH=""
-              if [ -f "venv/.requirements_hash" ]; then
-                OLD_HASH=$(cat venv/.requirements_hash)
+              if [ -f ".venv/.uv_lock_hash" ]; then
+                OLD_HASH=$(cat .venv/.uv_lock_hash)
               fi
 
-              if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -d "venv" ]; then
-                echo "Requirements changed or venv missing, installing..."
-                sudo rm -rf venv
-                sudo python3 -m venv venv
-                sudo /app/ai-server/venv/bin/pip install --upgrade pip -q
-                sudo /app/ai-server/venv/bin/pip install -r requirements.txt -q
-                echo "$NEW_HASH" | sudo tee venv/.requirements_hash > /dev/null
+              if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -d ".venv" ]; then
+                echo "uv.lock changed or .venv missing, installing..."
+                sudo rm -rf .venv
+                sudo $HOME/.local/bin/uv sync --frozen
+                echo "$NEW_HASH" | sudo tee .venv/.uv_lock_hash > /dev/null
                 echo "Dependencies installed"
               else
-                echo "Requirements unchanged, skipping venv setup"
+                echo "uv.lock unchanged, skipping dependency install"
               fi
 
               # 권한 설정 (동적 사용자)
@@ -169,3 +189,11 @@ jobs:
                 exit 1
               fi
             '
+
+      - name: Remove Firewall Rule
+        if: always()
+        run: |
+          gcloud compute firewall-rules delete github-actions-temp-${{ github.run_id }} \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --quiet || true
+          echo "Firewall rule removed"
