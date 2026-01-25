@@ -1,5 +1,7 @@
 from typing import Any
+
 import httpx
+
 
 class CallbackService:
     def __init__(self, http: httpx.AsyncClient, base_url: str, token: str):

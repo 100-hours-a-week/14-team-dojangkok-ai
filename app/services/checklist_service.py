@@ -1,11 +1,12 @@
 from __future__ import annotations
-from typing import TypedDict
+
 import json
 import re
+from typing import TypedDict
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
+
 from app.resources.vllm.client import VLLMClient
-
 
 COMMON_CHECKLIST: list[str] = [
     "보증금이 주변 시세 대비 과도하지 않은지 확인하세요.",
@@ -27,7 +28,7 @@ COMMON_CHECKLIST: list[str] = [
     "보증금/월세 입금 계좌 예금주가 임대인(또는 적법 수령자)인지 확인하세요.",
     "관리비 포함 항목과 부담 주체가 계약서에 적혀있는지 확인하세요.",
     "구두로 약속한 내용이 있다면 특약에 반영됐는지 확인하세요.",
-    "입주 전 집 상태가 계약 조건과 동일한지 확인하세요."
+    "입주 전 집 상태가 계약 조건과 동일한지 확인하세요.",
 ]
 
 
@@ -56,12 +57,15 @@ def _normalize_keywords(keywords: list[str]) -> list[str]:
 def _build_prompt(keywords: list[str], common: list[str]) -> list[dict[str, str]]:
     system = (
         "너는 주택 임대차 계약 체크리스트를 생성하는 도우미다.\n"
+        "반드시 아래 규칙을 지켜라.\n\n"
         "출력 규칙:\n"
-        "1) JSON 배열(list)만 출력. 예: [\"...\", \"...\"]\n"
-        "2) 전체 항목 수는 20~30개 이하\n"
-        "3) 공통 체크리스트 항목은 유지하되, 키워드에 맞는 항목을 추가/보강\n"
-        "4) 중복 항목 제거\n"
-        "5) 각 문장은 반드시 '~확인하세요.'로 끝나야 함\n"
+        "1) 출력은 JSON 배열(list) 1개만. 다른 설명/문장/코드블록 금지\n"
+        '2) 예시: ["...확인하세요.", "...확인하세요."]\n'
+        "3) 전체 항목 수는 20~30개 이하\n"
+        "4) 공통 체크리스트는 유지하되, 키워드에 맞는 항목을 추가/보강\n"
+        "5) 중복 항목 제거\n"
+        "6) 각 항목은 완전한 한 문장이고 반드시 '확인하세요.'로 끝나야 함\n"
+        "7) 항목 내부에 대괄호([ ])/따옴표(\\\" ')/물결(~) 같은 깨진 기호를 포함하지 마라\n"
     )
 
     user = (
@@ -76,41 +80,85 @@ def _build_prompt(keywords: list[str], common: list[str]) -> list[dict[str, str]
     ]
 
 
+_BAD_TOKENS = {"[", "]", ",", "", "확인하세요.", "확인하세요", "[ 확인하세요.", "] 확인하세요."}
+
+
+def _clean_item(s: str) -> str:
+    s = (s or "").strip()
+    s = s.strip().strip(",").strip().strip('"').strip("'").strip()
+    s = s.replace('~",', "").replace('~"', "").replace("~", "").strip()
+
+    if s in _BAD_TOKENS:
+        return ""
+
+    s = re.sub(r"(확인하세요\.)\s*(확인하세요\.)+", r"\1", s)
+
+    if s and not s.endswith("확인하세요."):
+        if s.endswith("확인하세요"):
+            s = s + "."
+        else:
+            s = s.rstrip(".").strip()
+            s = s + " 확인하세요."
+    return s.strip()
+
+
+def _extract_json_list_loose(t: str) -> list[str] | None:
+    start = t.find("[")
+    end = t.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    candidate = t[start : end + 1].strip()
+    try:
+        data = json.loads(candidate)
+        if isinstance(data, list) and all(isinstance(x, str) for x in data):
+            return data
+    except Exception:
+        return None
+    return None
+
+
 def _parse_model_output(text: str) -> list[str]:
     t = (text or "").strip()
-
     try:
         data = json.loads(t)
         if isinstance(data, list) and all(isinstance(x, str) for x in data):
-            return [x.strip() for x in data if x and x.strip()]
+            out: list[str] = []
+            seen: set[str] = set()
+            for x in data:
+                item = _clean_item(x)
+                if item and item not in seen:
+                    seen.add(item)
+                    out.append(item)
+            return out
     except Exception:
         pass
 
     t = re.sub(r"^```.*?\n|\n```$", "", t, flags=re.DOTALL).strip()
-    lines = []
-    for line in t.splitlines():
-        s = line.strip()
+
+    data2 = _extract_json_list_loose(t)
+    if data2 is not None:
+        out: list[str] = []
+        seen: set[str] = set()
+        for x in data2:
+            item = _clean_item(x)
+            if item and item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    parts = t.splitlines() if "\n" in t else t.split(",")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        s = p.strip()
         s = re.sub(r"^\d+\.\s*", "", s)
         s = re.sub(r"^-+\s*", "", s)
-        if s:
-            lines.append(s)
-
-    out = []
-    seen = set()
-    for x in lines:
-        x2 = x.strip().strip('"').strip()
-        if not x2:
-            continue
-        if not x2.endswith("확인하세요."):
-            if x2.endswith("."):
-                x2 = x2[:-1].rstrip()
-            if not x2.endswith("확인하세요"):
-                x2 = x2 + " 확인하세요."
-            else:
-                x2 = x2 + "."
-        if x2 not in seen:
-            seen.add(x2)
-            out.append(x2)
+        item = _clean_item(s)
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
 
     return out
 
@@ -144,11 +192,20 @@ class ChecklistService:
 
             merged = []
             seen = set()
-            for x in COMMON_CHECKLIST + items:
-                x2 = (x or "").strip()
+            for x in COMMON_CHECKLIST:
+                x2 = _clean_item(x)
                 if x2 and x2 not in seen:
                     seen.add(x2)
                     merged.append(x2)
+
+            for x in items:
+                x2 = _clean_item(x)
+                if x2 and x2 not in seen:
+                    seen.add(x2)
+                    merged.append(x2)
+
+            if not merged:
+                merged = COMMON_CHECKLIST[:]
 
             state["checklists"] = merged[:30]
             return state
@@ -158,7 +215,9 @@ class ChecklistService:
         g.add_node("with_keywords", with_keywords)
 
         g.set_entry_point("start")
-        g.add_conditional_edges("start", route, {"no_keywords": "no_keywords", "with_keywords": "with_keywords"})
+        g.add_conditional_edges(
+            "start", route, {"no_keywords": "no_keywords", "with_keywords": "with_keywords"}
+        )
         g.add_edge("no_keywords", END)
         g.add_edge("with_keywords", END)
 
