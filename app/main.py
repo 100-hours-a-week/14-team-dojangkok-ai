@@ -1,7 +1,10 @@
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from app.bootstrap import create_container
+
 from app.api.routers.checklist import router as checklist_router
+from app.bootstrap import create_container
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
