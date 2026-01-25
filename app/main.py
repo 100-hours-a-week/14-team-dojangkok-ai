@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routers.checklist import router as checklist_router
+from app.api.routers.easy_contract import router as easy_contract_router
 from app.bootstrap import create_container
 
 
@@ -21,6 +22,7 @@ app = FastAPI(
 )
 
 app.include_router(checklist_router)
+app.include_router(easy_contract_router)
 
 
 @app.get("/health")
