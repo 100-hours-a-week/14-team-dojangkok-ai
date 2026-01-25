@@ -1,11 +1,12 @@
 from dataclasses import dataclass
+
 import httpx
 
-from app.settings import settings
 from app.resources.http.client import create_async_http_client
 from app.resources.vllm.client import VLLMClient
 from app.services.callback_service import CallbackService
 from app.services.checklist_service import ChecklistService
+from app.settings import settings
 
 
 @dataclass
