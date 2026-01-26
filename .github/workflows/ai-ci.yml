@@ -70,7 +70,7 @@ jobs:
 
   # ============================================
   # Build
-  # dev push, main PR에서만 실행 (main push 제외)
+  # dev push, main PR, 수동 실행 시
   # ============================================
   build:
     name: Build
@@ -78,7 +78,8 @@ jobs:
     needs: lint-test
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
-      (github.event_name == 'pull_request' && github.base_ref == 'main')
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
