@@ -15,7 +15,7 @@ class CallbackService:
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        print(payload)
+        print("체크리스트 콜백 json: ", payload)
 
         res = await self.http.post(url, json=payload, headers=headers)
         res.raise_for_status()

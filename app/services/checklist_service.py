@@ -60,11 +60,11 @@ def _build_prompt(keywords: list[str], common: list[str]) -> list[dict[str, str]
         "반드시 아래 규칙을 지켜라.\n\n"
         "출력 규칙:\n"
         "1) 출력은 JSON 배열(list) 1개만. 다른 설명/문장/코드블록 금지\n"
-        '2) 예시: ["...확인하세요.", "...확인하세요."]\n'
+        '2) 예시: ["...확인하세요.", "...검토하세요."]\n'
         "3) 전체 항목 수는 20~30개 이하\n"
         "4) 공통 체크리스트는 유지하되, 키워드에 맞는 항목을 추가/보강\n"
         "5) 중복 항목 제거\n"
-        "6) 각 항목은 완전한 한 문장이고 반드시 '확인하세요.'로 끝나야 함\n"
+        "6) 각 항목은 완전한 한 문장이고 확인, 검토하라는 말투로 끝나야 하며 단정지어서 말하면 안됨\n"
         "7) 항목 내부에 대괄호([ ])/따옴표(\\\" ')/물결(~) 같은 깨진 기호를 포함하지 마라\n"
     )
 
@@ -80,42 +80,15 @@ def _build_prompt(keywords: list[str], common: list[str]) -> list[dict[str, str]
     ]
 
 
-_BAD_TOKENS = {"[", "]", ",", "", "확인하세요.", "확인하세요", "[ 확인하세요.", "] 확인하세요."}
+_BAD_TOKENS = {"", "[", "]"}
 
 
 def _clean_item(s: str) -> str:
     s = (s or "").strip()
-    s = s.strip().strip(",").strip().strip('"').strip("'").strip()
-    s = s.replace('~",', "").replace('~"', "").replace("~", "").strip()
-
     if s in _BAD_TOKENS:
         return ""
+    return s
 
-    s = re.sub(r"(확인하세요\.)\s*(확인하세요\.)+", r"\1", s)
-
-    if s and not s.endswith("확인하세요."):
-        if s.endswith("확인하세요"):
-            s = s + "."
-        else:
-            s = s.rstrip(".").strip()
-            s = s + " 확인하세요."
-    return s.strip()
-
-
-def _extract_json_list_loose(t: str) -> list[str] | None:
-    start = t.find("[")
-    end = t.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        return None
-
-    candidate = t[start : end + 1].strip()
-    try:
-        data = json.loads(candidate)
-        if isinstance(data, list) and all(isinstance(x, str) for x in data):
-            return data
-    except Exception:
-        return None
-    return None
 
 
 def _parse_model_output(text: str) -> list[str]:
@@ -133,34 +106,7 @@ def _parse_model_output(text: str) -> list[str]:
             return out
     except Exception:
         pass
-
-    t = re.sub(r"^```.*?\n|\n```$", "", t, flags=re.DOTALL).strip()
-
-    data2 = _extract_json_list_loose(t)
-    if data2 is not None:
-        out: list[str] = []
-        seen: set[str] = set()
-        for x in data2:
-            item = _clean_item(x)
-            if item and item not in seen:
-                seen.add(item)
-                out.append(item)
-        return out
-
-    parts = t.splitlines() if "\n" in t else t.split(",")
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for p in parts:
-        s = p.strip()
-        s = re.sub(r"^\d+\.\s*", "", s)
-        s = re.sub(r"^-+\s*", "", s)
-        item = _clean_item(s)
-        if item and item not in seen:
-            seen.add(item)
-            out.append(item)
-
-    return out
+    return []
 
 
 class ChecklistService:
@@ -169,7 +115,6 @@ class ChecklistService:
         self.graph = self._build_graph()
 
     def _build_graph(self):
-        print("그래프 빌드 시작")
         g = StateGraph(ChecklistState)
 
         def start(state: ChecklistState) -> ChecklistState:
@@ -188,16 +133,10 @@ class ChecklistService:
             print("체크리스트 생성 모델 요청")
             content = await self.vllm.chat(msgs, temperature=0.2, max_tokens=800)
             items = _parse_model_output(content)
-            print(items)
+            print("체크리스트 llm output:", items)
 
             merged = []
             seen = set()
-            for x in COMMON_CHECKLIST:
-                x2 = _clean_item(x)
-                if x2 and x2 not in seen:
-                    seen.add(x2)
-                    merged.append(x2)
-
             for x in items:
                 x2 = _clean_item(x)
                 if x2 and x2 not in seen:
