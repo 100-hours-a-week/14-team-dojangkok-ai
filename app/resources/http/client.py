@@ -1,5 +1,6 @@
 import httpx
 
+
 def create_async_http_client(timeout_sec: float) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_sec),
