@@ -1,7 +1,7 @@
 # AI Server CD Pipeline
 # 위치: .github/workflows/ai-cd.yml
 #
-# 트리거: main 브랜치 PR 머지 (자동), 수동 (workflow_dispatch)
+# 트리거: CI 완료 후 자동 실행 (workflow_run), 수동 (workflow_dispatch)
 # 인증: GCP Workload Identity Federation (OIDC)
 # 배포: In-place 배포 (VM 직접 업데이트)
 # 패키지 관리: uv (pyproject.toml + uv.lock)
@@ -9,9 +9,10 @@
 name: AI Server CD
 
 on:
-  pull_request:
-    types: [closed]
-    branches: [main]
+  workflow_run:
+    workflows: ["AI Server CI"]
+    types: [completed]
+    # branches 제거: PR head branch가 아닌 artifact 존재 여부로 필터링
   workflow_dispatch:
 
 env:
@@ -26,7 +27,13 @@ jobs:
     name: Deploy to GCP
     runs-on: ubuntu-22.04
     environment: 1-bigbang
-    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    # workflow_run: PR에서 실행된 CI가 성공한 경우 (main으로의 PR은 artifact 생성)
+    # workflow_dispatch: 수동 실행
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request') ||
+      (github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
       id-token: write
@@ -64,14 +71,22 @@ jobs:
         run: |
           mkdir -p ./artifact
 
-          RUN_ID=$(gh run list \
-            --repo ${{ github.repository }} \
-            --workflow="AI Server CI" \
-            --branch=main \
-            --status=success \
-            --limit=1 \
-            --json databaseId \
-            --jq '.[0].databaseId')
+          # workflow_run 이벤트면 해당 CI run 사용
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            RUN_ID=${{ github.event.workflow_run.id }}
+            echo "Using workflow_run CI run ID: $RUN_ID"
+          else
+            # workflow_dispatch면 최근 성공한 CI run 사용
+            RUN_ID=$(gh run list \
+              --repo ${{ github.repository }} \
+              --workflow="AI Server CI" \
+              --branch=main \
+              --status=success \
+              --limit=1 \
+              --json databaseId \
+              --jq '.[0].databaseId')
+            echo "Using latest successful CI run ID: $RUN_ID"
+          fi
 
           if [ -z "$RUN_ID" ]; then
             echo "No successful CI run found"
