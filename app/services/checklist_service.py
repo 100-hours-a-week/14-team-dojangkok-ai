@@ -56,22 +56,18 @@ def _normalize_keywords(keywords: list[str]) -> list[str]:
 
 def _build_prompt(keywords: list[str], common: list[str]) -> list[dict[str, str]]:
     system = (
-        "너는 주택 임대차 계약 체크리스트를 생성하는 도우미다.\n"
-        "반드시 아래 규칙을 지켜라.\n\n"
-        "출력 규칙:\n"
-        "1) 출력은 JSON 배열(list) 1개만. 다른 설명/문장/코드블록 금지\n"
-        '2) 예시: ["...확인하세요.", "...검토하세요."]\n'
-        "3) 전체 항목 수는 20~30개 이하\n"
-        "4) 공통 체크리스트는 유지하되, 키워드에 맞는 항목을 추가/보강\n"
-        "5) 중복 항목 제거\n"
-        "6) 각 항목은 완전한 한 문장이고 확인, 검토하라는 말투로 끝나야 하며 단정지어서 말하면 안됨\n"
-        "7) 항목 내부에 대괄호([ ])/따옴표(\\\" ')/물결(~) 같은 깨진 기호를 포함하지 마라\n"
+        "너는 주택임대차계약을 보조하는 ai다. 아래의 출력 규칙을 따라서 계약 시의 체크리스트를 만들어라\n"
+        '출력은 JSON 배열(list)로 "[\"문장1\", \"문장2\"]출력한다\n'
+        "JSON 배열 외의 설명, 문장, 코드블록, ```json 표시는 절대 출력하지 마라.\n"
+        "배열의 각 원소는 문자열이며, 문자열 내부에 따옴표(\" , ')나 대괄호([ ])를 포함하지 마라.\n\n"
+        "[공통 체크리스트]\n"
+        "- " + "\n- ".join(common) + "\n\n"
     )
 
     user = (
-        "[공통 체크리스트]\n- " + "\n- ".join(common) + "\n\n"
-        "[사용자 키워드]\n- " + "\n- ".join(keywords) + "\n\n"
-        "위 정보를 바탕으로 최종 체크리스트를 만들어줘."
+        "[사용자 키워드]\n"
+        "- " + "\n- ".join(keywords) + "\n\n"
+        "위 정보를 바탕으로 공통체크리스트와 중복되지 않도록 계약에 대한 체크리스트를 생성하라."
     )
 
     return [
@@ -79,9 +75,7 @@ def _build_prompt(keywords: list[str], common: list[str]) -> list[dict[str, str]
         {"role": "user", "content": user},
     ]
 
-
 _BAD_TOKENS = {"", "[", "]"}
-
 
 def _clean_item(s: str) -> str:
     s = (s or "").strip()
@@ -90,23 +84,35 @@ def _clean_item(s: str) -> str:
     return s
 
 
-
 def _parse_model_output(text: str) -> list[str]:
     t = (text or "").strip()
+
+    t = re.sub(r"^```(?:json)?\s*", "", t.strip(), flags=re.IGNORECASE)
+    t = re.sub(r"\s*```$", "", t.strip())
+
+    start = t.find("[")
+    end = t.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        candidate = t[start:end+1]
+    else:
+        candidate = t
+
     try:
-        data = json.loads(t)
-        if isinstance(data, list) and all(isinstance(x, str) for x in data):
-            out: list[str] = []
-            seen: set[str] = set()
-            for x in data:
-                item = _clean_item(x)
-                if item and item not in seen:
-                    seen.add(item)
-                    out.append(item)
-            return out
+        data = json.loads(candidate)
     except Exception:
-        pass
-    return []
+        return []
+
+    if not (isinstance(data, list) and all(isinstance(x, str) for x in data)):
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in data:
+        item = _clean_item(x)
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
 
 
 class ChecklistService:
@@ -132,12 +138,12 @@ class ChecklistService:
             msgs = _build_prompt(state["keywords"], COMMON_CHECKLIST)
             print("체크리스트 생성 모델 요청")
             content = await self.vllm.chat(msgs, temperature=0.2, max_tokens=800)
+            print("체크리스트 llm output:", content)
             items = _parse_model_output(content)
-            print("체크리스트 llm output:", items)
 
             merged = []
             seen = set()
-            for x in items:
+            for x in COMMON_CHECKLIST + items:
                 x2 = _clean_item(x)
                 if x2 and x2 not in seen:
                     seen.add(x2)
