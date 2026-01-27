@@ -79,6 +79,7 @@ class EasyContractService:
         g = StateGraph(EasyContractState)
 
         async def ocr_stage(state: EasyContractState) -> EasyContractState:
+            print("계약서 ocr stage")
             pages_text: list[dict[str, Any]] = []
 
             for doc in state["docs"]:
@@ -114,6 +115,7 @@ class EasyContractService:
             return state
 
         async def page_summarize_stage(state: EasyContractState) -> EasyContractState:
+            print("계약서 페이지별 요약 시작")
             summaries: list[dict[str, Any]] = []
             for p in state.get("pages_text", []):
                 txt = (p.get("text") or "").strip()
@@ -162,5 +164,8 @@ class EasyContractService:
         return g.compile()
 
     async def generate(self, case_id: int, docs: list[dict[str, Any]]) -> str:
+        print("쉬운 계약서 시작")
         out = await self.graph.ainvoke({"case_id": case_id, "docs": docs})
+        print("쉬운 계약서 마크다운 생성 완료")
+        print(out.get("markdown", ""))
         return out.get("markdown", "")
