@@ -58,6 +58,7 @@ def setup_json_logging() -> None:
             fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
             rename_fields={"asctime": "timestamp", "levelname": "level"},
             datefmt="%Y-%m-%dT%H:%M:%S%z",
+            json_ensure_ascii=False,
         ))
     else:
         console_handler.setFormatter(logging.Formatter(
@@ -85,6 +86,7 @@ def setup_json_logging() -> None:
                 fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
                 rename_fields={"asctime": "timestamp", "levelname": "level"},
                 datefmt="%Y-%m-%dT%H:%M:%S%z",
+                json_ensure_ascii=False,
             ))
         else:
             file_handler.setFormatter(logging.Formatter(
