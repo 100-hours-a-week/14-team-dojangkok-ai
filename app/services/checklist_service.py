@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
+
+logger = logging.getLogger(__name__)
 
 from app.resources.vllm.client import VLLMClient
 
@@ -136,9 +139,9 @@ class ChecklistService:
 
         async def with_keywords(state: ChecklistState) -> ChecklistState:
             msgs = _build_prompt(state["keywords"], COMMON_CHECKLIST)
-            print("체크리스트 생성 모델 요청")
+            logger.info("체크리스트 생성 모델 요청")
             content = await self.vllm.chat(msgs, temperature=0.2, max_tokens=800)
-            print("체크리스트 llm output:", content)
+            logger.info("체크리스트 LLM 응답", extra={"content_length": len(content)})
             items = _parse_model_output(content)
 
             merged = []
@@ -170,5 +173,5 @@ class ChecklistService:
 
     async def generate(self, case_id: str, keywords: list[str]) -> list[str]:
         out = await self.graph.ainvoke({"case_id": case_id, "keywords": keywords})
-        print("체크리스트 생성 완료")
+        logger.info("체크리스트 생성 완료", extra={"case_id": case_id, "count": len(out.get("checklists", []))})
         return out.get("checklists", COMMON_CHECKLIST)
