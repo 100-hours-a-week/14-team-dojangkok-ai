@@ -1,7 +1,10 @@
 from __future__ import annotations
+import logging
 from typing import TypedDict, List, Dict, Any
 
 from langgraph.graph import StateGraph, END
+
+logger = logging.getLogger(__name__)
 
 from app.resources.vllm.client import VLLMClient
 from app.resources.ocr.upstage_client import UpstageDocumentParseClient
@@ -79,7 +82,7 @@ class EasyContractService:
         g = StateGraph(EasyContractState)
 
         async def ocr_stage(state: EasyContractState) -> EasyContractState:
-            print("계약서 ocr stage")
+            logger.info("계약서 ocr stage")
             pages_text: list[dict[str, Any]] = []
 
             for doc in state["docs"]:
@@ -90,32 +93,32 @@ class EasyContractService:
                 if filename.lower().endswith(".pdf"):
                     from app.utils.pdf_images import pdf_bytes_to_png_pages
                     try:
-                        print("pdf 이미지 변환중")
+                        logger.info("pdf 이미지 변환중")
                         page_images = pdf_bytes_to_png_pages(b, zoom=2.0)
-                        print("pdf 이미지 변환완료")
+                        logger.info("pdf 이미지 변환완료")
                     except Exception as e:
                         raise RuntimeError("UNPROCESSABLE_DOCUMENT") from e
 
                     for i, img in enumerate(page_images, start=1):
-                        print("이미지로 변환 후 ocr 요청")
+                        logger.info("이미지로 변환 후 ocr 요청")
                         data = await self.ocr.parse_image(img, filename=f"{filename}.p{i}.png")
-                        print("ocr 완료 후 텍스트 추출")
+                        logger.info("ocr 완료 후 텍스트 추출")
                         text = extract_plain_text_from_upstage_json(data)
-                        print(text)
+                        logger.debug("OCR 결과", extra={"text_length": len(text)})
                         pages_text.append({"doc_type": doc_type, "file": filename, "page": i, "text": text})
                 else:
-                    print("ocr 요청")
+                    logger.info("ocr 요청")
                     data = await self.ocr.parse_image(b, filename=filename)
-                    print("ocr 완료 후 텍스트 추출")
+                    logger.info("ocr 완료 후 텍스트 추출")
                     text = extract_plain_text_from_upstage_json(data)
-                    print(text)
+                    logger.debug("OCR 결과", extra={"text_length": len(text)})
                     pages_text.append({"doc_type": doc_type, "file": filename, "page": 1, "text": text})
 
             state["pages_text"] = pages_text
             return state
 
         async def page_summarize_stage(state: EasyContractState) -> EasyContractState:
-            print("계약서 페이지별 요약 시작")
+            logger.info("계약서 페이지별 요약 시작")
             summaries: list[dict[str, Any]] = []
             for p in state.get("pages_text", []):
                 txt = (p.get("text") or "").strip()
@@ -123,14 +126,14 @@ class EasyContractService:
                     continue
 
                 msgs = _page_summary_prompt(p["doc_type"], p["page"], txt[:20000])
-                print("계약서 요약중")
+                logger.info("계약서 요약중")
                 summary = await self.vllm.chat(
                     msgs,
                     temperature=0.2,
                     max_tokens=500,
                     lora_adapter=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
                 )
-                print(summary)
+                logger.debug("계약서 요약 결과", extra={"summary_length": len(summary)})
                 summaries.append(
                     {"doc_type": p["doc_type"], "file": p["file"], "page": p["page"], "summary": summary.strip()}
                 )
@@ -140,16 +143,16 @@ class EasyContractService:
 
         async def final_stage(state: EasyContractState) -> EasyContractState:
             msgs = _final_markdown_prompt(state.get("page_summaries", []))
-            print("쉬운계약서 생성 요청")
+            logger.info("쉬운계약서 생성 요청")
             md = await self.vllm.chat(
                 msgs,
                 temperature=0.2,
                 max_tokens=1200,
                 lora_adapter=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
             )
-            print("쉬운계약서 생성 완료")
+            logger.info("쉬운계약서 생성 완료")
             state["markdown"] = md.strip()
-            print(state["markdown"])
+            logger.debug("마크다운 생성 완료", extra={"length": len(state["markdown"])})
             return state
 
         g.add_node("ocr", ocr_stage)
@@ -164,8 +167,7 @@ class EasyContractService:
         return g.compile()
 
     async def generate(self, case_id: int, docs: list[dict[str, Any]]) -> str:
-        print("쉬운 계약서 시작")
+        logger.info("쉬운 계약서 시작", extra={"case_id": case_id})
         out = await self.graph.ainvoke({"case_id": case_id, "docs": docs})
-        print("쉬운 계약서 마크다운 생성 완료")
-        print(out.get("markdown", ""))
+        logger.info("쉬운 계약서 마크다운 생성 완료", extra={"case_id": case_id, "length": len(out.get("markdown", ""))})
         return out.get("markdown", "")
