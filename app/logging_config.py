@@ -118,5 +118,6 @@ def setup_json_logging() -> None:
     app_logger = logging.getLogger("app")
     app_logger.handlers.clear()
     app_logger.setLevel(log_level)
+    app_logger.propagate = False  # root 로거로 전파 방지 (중복 로그 방지)
     for handler in handlers:
         app_logger.addHandler(handler)
