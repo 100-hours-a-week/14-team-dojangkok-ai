@@ -110,3 +110,11 @@ def setup_json_logging() -> None:
         logger.setLevel(log_level)
         for handler in handlers:
             logger.addHandler(handler)
+
+    # === app 로거 설정 (서비스 로거 포함) ===
+    # app.services.*, app.api.* 등 모든 하위 로거에 핸들러 적용
+    app_logger = logging.getLogger("app")
+    app_logger.handlers.clear()
+    app_logger.setLevel(log_level)
+    for handler in handlers:
+        app_logger.addHandler(handler)
