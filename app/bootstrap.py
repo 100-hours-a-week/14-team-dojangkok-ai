@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 import httpx
+from aiolimiter import AsyncLimiter
 
 from app.resources.http.client import create_async_http_client
 from app.resources.vllm.client import VLLMClient
@@ -34,10 +35,12 @@ async def create_container() -> AppContainer:
         model=settings.VLLM_MODEL,
     )
 
+    ocr_limiter = AsyncLimiter(1, time_period=2)
     upstage = UpstageDocumentParseClient(
         http=http,
         api_key=settings.UPSTAGE_API_KEY,
         url=settings.UPSTAGE_DOCUMENT_PARSE_URL,
+        limiter=ocr_limiter,
     )
 
     callback = CallbackService(

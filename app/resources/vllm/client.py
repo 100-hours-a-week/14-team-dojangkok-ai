@@ -20,21 +20,18 @@ class VLLMClient:
         self,
         messages: list[dict[str, str]],
         temperature: float = 0.2,
-        max_tokens: int = 512,
-        lora_adapter: str | None = None,
+        max_tokens: int = 1024,
+        model: str | None = None,
     ) -> str:
         url = f"{self.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-
-        if lora_adapter:
-            payload["extra_body"] = {"lora_adapter": lora_adapter}
 
         res = await self.http.post(url, json=payload, headers=headers)
         res.raise_for_status()

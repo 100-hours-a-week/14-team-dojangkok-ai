@@ -40,7 +40,8 @@ def _page_summary_prompt(doc_type: str, page_no: int, text: str) -> list[dict[st
         f"[문서타입] {doc_type}\n"
         f"[페이지] {page_no}\n"
         f"[OCR 텍스트]\n{text}\n\n"
-        "이 페이지에서 중요한 조항과 날짜/금액만 불릿으로 정리해줘."
+        "이 페이지에서 중요한 조항과 날계약일/임대차기간/보증금/월세/관리비/특약/위약금/해지조건/수리·하자/원상복구만 불릿으로 정리해줘.\n"
+        "반드시 OCR 텍스트에 제시된 내용을 정리하고 없는 정보를 만들어내지 마라.\n"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -68,6 +69,7 @@ def _final_markdown_prompt(page_summaries: list[dict[str, Any]]) -> list[dict[st
     user = (
         "[페이지별 핵심 요약]\n" + "\n".join(lines) + "\n\n"
         "위 주택 임대차 계약서 요약들을 종합하여 계약서를 설명하고 분석한 결과를 마크다운으로 작성해줘."
+        "반드시 페이지별 핵심 요약을 기반으로 작성하고 없는 정보를 만들어내지 마라.\n"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -130,8 +132,8 @@ class EasyContractService:
                 summary = await self.vllm.chat(
                     msgs,
                     temperature=0.2,
-                    max_tokens=500,
-                    lora_adapter=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
+                    max_tokens=1024,
+                    model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
                 )
                 logger.debug("계약서 요약 결과", extra={"summary_length": len(summary)})
                 summaries.append(
@@ -147,8 +149,8 @@ class EasyContractService:
             md = await self.vllm.chat(
                 msgs,
                 temperature=0.2,
-                max_tokens=1200,
-                lora_adapter=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
+                max_tokens=2048,
+                model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
             )
             logger.info("쉬운계약서 생성 완료")
             state["markdown"] = md.strip()
