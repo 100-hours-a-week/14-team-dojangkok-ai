@@ -10,6 +10,8 @@ from langgraph.graph import END, StateGraph
 logger = logging.getLogger(__name__)
 
 from app.resources.vllm.client import VLLMClient
+from app.settings import settings
+
 
 COMMON_CHECKLIST: list[str] = [
     "보증금이 주변 시세 대비 과도하지 않은지 확인하세요.",
@@ -140,7 +142,12 @@ class ChecklistService:
         async def with_keywords(state: ChecklistState) -> ChecklistState:
             msgs = _build_prompt(state["keywords"], COMMON_CHECKLIST)
             logger.info("체크리스트 생성 모델 요청")
-            content = await self.vllm.chat(msgs, temperature=0.2, max_tokens=800)
+            content = await self.vllm.chat(
+                msgs,
+                temperature=0.2,
+                max_tokens=1024,
+                model=settings.VLLM_LORA_ADAPTER_CHECKLIST,
+            )
             logger.info("체크리스트 LLM 응답", extra={"content_length": len(content)})
             items = _parse_model_output(content)
 
