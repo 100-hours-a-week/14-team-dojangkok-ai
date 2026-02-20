@@ -240,7 +240,7 @@ jobs:
           DISK_TYPE=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --format='value(properties.disks[0].initializeParams.diskType)')
-          BOOT_IMAGE=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+          SOURCE_IMAGE=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --format='value(properties.disks[0].initializeParams.sourceImage)')
           SUBNET=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
@@ -251,10 +251,18 @@ jobs:
             --format='value(properties.serviceAccounts[0].email)')
           TAGS=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
             --project=${{ secrets.GCP_PROJECT_ID }} \
-            --format='csv[no-heading](properties.tags.items)')
+            --format='csv[no-heading](properties.tags.items)' | tr ';' ',')
+
+          # sourceImage 경로 파싱: family/ 포함 시 --image-family, 아니면 --image
+          if echo "$SOURCE_IMAGE" | grep -q '/family/'; then
+            IMAGE_FLAG="--image-family=$(echo "$SOURCE_IMAGE" | sed 's|.*/family/||')"
+          else
+            IMAGE_FLAG="--image=$(echo "$SOURCE_IMAGE" | sed 's|.*/images/||')"
+          fi
 
           echo "Extracted from $CURRENT_TPL:"
           echo "  machineType=$MACHINE_TYPE, diskSize=$DISK_SIZE, diskType=$DISK_TYPE"
+          echo "  sourceImage=$SOURCE_IMAGE → $IMAGE_FLAG"
           echo "  subnet=$SUBNET, sa=$SA_EMAIL, tags=$TAGS"
 
           gcloud compute instance-templates create "$NEW_TEMPLATE" \
@@ -262,7 +270,7 @@ jobs:
             --machine-type="$MACHINE_TYPE" \
             --boot-disk-size="${DISK_SIZE}GB" \
             --boot-disk-type="$DISK_TYPE" \
-            --image="$BOOT_IMAGE" \
+            $IMAGE_FLAG \
             --subnet="$SUBNET" \
             --no-address \
             --service-account="$SA_EMAIL" \
