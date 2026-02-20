@@ -1,20 +1,27 @@
-# AI Server CI/CD Pipeline
+# AI Server CI/CD Pipeline (v2 - Multi-Environment)
 # 위치: .github/workflows/ai-cicd.yml
 #
 # 트리거:
-#   - PR → dev/main: lint-test, build-and-artifact
-#   - Push main (PR 머지): lint-test, build-and-artifact, deploy
-#   - workflow_dispatch: 모든 job 실행
+#   - PR → dev/main: lint-test만 실행
+#   - Push dev (PR 머지): lint-test → build-push → deploy (2-v2-dev)
+#   - Push main (PR 머지): lint-test → build-push → deploy (2-v2-prod)
+#   - workflow_dispatch: 전체 실행 (환경 선택 가능)
 #
 # 패키지 관리: uv (pyproject.toml + uv.lock)
 # 인증: GCP Workload Identity Federation (OIDC)
-# 배포: In-place 배포 (VM 직접 업데이트)
+# 배포: Docker Build → AR Push → MIG Rolling Update
+#
+# GitHub Environments 필요:
+#   - 2-v2-dev: DEV 프로젝트 secrets
+#   - 2-v2-prod: PROD 프로젝트 secrets
+#   각 환경에 동일 이름의 secret 등록 (값만 다르게):
+#     WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT,
+#     GCP_PROJECT_ID, AR_REPO, MIG_NAME, GCP_ZONE
 
-name: AI Server CI/CD
+name: AI Server CI/CD (v2)
 
-# 동시 실행 방지
 concurrency:
-  group: ai-server-cicd-${{ github.ref }}
+  group: ai-server-v2-${{ github.ref }}
   cancel-in-progress: true
 
 on:
@@ -25,17 +32,61 @@ on:
       - '**.md'
       - 'docs/**'
   pull_request:
-    branches: [main, dev]
+    branches: [dev, main]
     paths-ignore:
       - '.github/workflows/**'
       - '**.md'
       - 'docs/**'
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deploy environment'
+        required: true
+        default: '2-v2-dev'
+        type: choice
+        options:
+          - 2-v2-dev
+          - 2-v2-prod
 
 env:
   PYTHON_VERSION: "3.10"
+  GCP_REGION: "asia-northeast3"
+  AR_HOST: "asia-northeast3-docker.pkg.dev"
 
 jobs:
+  # ============================================
+  # 환경 결정
+  # ============================================
+  set-env:
+    name: Set Environment
+    runs-on: ubuntu-22.04
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      should_deploy: ${{ steps.env.outputs.should_deploy }}
+      image_tag: ${{ steps.env.outputs.image_tag }}
+    steps:
+      - name: Determine Environment
+        id: env
+        run: |
+          SHA_SHORT="${GITHUB_SHA::7}"
+          echo "image_tag=$SHA_SHORT" >> $GITHUB_OUTPUT
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            if [ "${{ github.ref }}" = "refs/heads/dev" ]; then
+              echo "environment=2-v2-dev" >> $GITHUB_OUTPUT
+            else
+              echo "environment=2-v2-prod" >> $GITHUB_OUTPUT
+            fi
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+          else
+            # PR: lint-test만 실행
+            echo "environment=" >> $GITHUB_OUTPUT
+            echo "should_deploy=false" >> $GITHUB_OUTPUT
+          fi
+
   # ============================================
   # CI: Lint & Test
   # ============================================
@@ -74,75 +125,22 @@ jobs:
           fi
 
   # ============================================
-  # CI: Build & Artifact
+  # CI/CD: Docker Build → GAR Push
   # ============================================
-  build-and-artifact:
-    name: Build & Artifact
+  build-push:
+    name: Build & Push to GAR
+    if: needs.set-env.outputs.should_deploy == 'true'
+    needs: [set-env, lint-test]
     runs-on: ubuntu-22.04
-    needs: lint-test
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Install Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: uv sync --frozen --no-dev
-
-      - name: Verify Build
-        run: |
-          uv run python -m py_compile $(find . -name "*.py" -not -path "./.venv/*" -not -path "./venv/*" 2>/dev/null || echo "")
-          echo "Build verification completed"
-
-      - name: Create Artifact
-        run: |
-          mkdir -p dist
-          tar -czvf dist/ai-server-${{ github.sha }}.tar.gz \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='__pycache__' \
-            --exclude='.pytest_cache' \
-            --exclude='.ruff_cache' \
-            --exclude='*.pyc' \
-            --exclude='venv' \
-            --exclude='.venv' \
-            .
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-server-${{ github.sha }}
-          path: dist/
-          retention-days: 7
-
-  # ============================================
-  # CD: Deploy (main 브랜치만)
-  # ============================================
-  deploy:
-    name: Deploy to GCP
-    if: github.ref == 'refs/heads/main'
-    needs: build-and-artifact
-    runs-on: ubuntu-22.04
-    environment: 1-bigbang
+    environment: ${{ needs.set-env.outputs.environment }}
     permissions:
       contents: read
       id-token: write
-      actions: read
-    env:
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      GCP_ZONE: ${{ secrets.GCP_ZONE }}
-      GCP_INSTANCE: ${{ secrets.GCP_INSTANCE }}
+    outputs:
+      image_uri: ${{ steps.build.outputs.image_uri }}
     steps:
-      - name: Get Runner IP
-        id: ip
-        run: echo "ip=$(curl -s ifconfig.me)" >> $GITHUB_OUTPUT
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Authenticate to GCP (OIDC)
         uses: google-github-actions/auth@v2
@@ -153,113 +151,216 @@ jobs:
       - name: Setup gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
         with:
-          project_id: ${{ env.GCP_PROJECT_ID }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      - name: Add Firewall Rule
+      - name: Configure Docker for GAR
+        run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
+
+      - name: Build & Push Docker Image
+        id: build
         run: |
-          gcloud compute firewall-rules create github-actions-temp-${{ github.run_id }} \
-            --allow=tcp:22 \
-            --source-ranges=${{ steps.ip.outputs.ip }}/32 \
-            --target-tags=ai-server \
-            --project=${{ env.GCP_PROJECT_ID }} \
-            --description="Temporary rule for GitHub Actions CD"
-          echo "Firewall rule created for IP: ${{ steps.ip.outputs.ip }}"
+          IMAGE_BASE="${{ env.AR_HOST }}/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.AR_REPO }}/ai-server"
+          TAG="${{ needs.set-env.outputs.image_tag }}"
 
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
+          echo "Building image: $IMAGE_BASE:$TAG"
+
+          docker build \
+            -t "$IMAGE_BASE:$TAG" \
+            -t "$IMAGE_BASE:latest" \
+            -f Dockerfile .
+
+          docker push "$IMAGE_BASE:$TAG"
+          docker push "$IMAGE_BASE:latest"
+
+          echo "image_uri=$IMAGE_BASE:$TAG" >> $GITHUB_OUTPUT
+
+      - name: Image Summary
+        run: |
+          echo "### Docker Image" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ steps.build.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Also tagged**: latest" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================
+  # CD: MIG Rolling Update
+  # ============================================
+  deploy:
+    name: Deploy (MIG Rolling Update)
+    if: needs.set-env.outputs.should_deploy == 'true'
+    needs: [set-env, build-push]
+    runs-on: ubuntu-22.04
+    environment: ${{ needs.set-env.outputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to GCP (OIDC)
+        uses: google-github-actions/auth@v2
         with:
-          name: ai-server-${{ github.sha }}
-          path: ./artifact
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-      - name: Deploy to VM
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Get Current Instance Template
+        id: current
         run: |
-          ARTIFACT_FILE=$(find ./artifact -name "*.tar.gz" | head -1)
-          if [ -z "$ARTIFACT_FILE" ]; then
-            echo "Artifact not found"
-            exit 1
-          fi
-          echo "Deploying: $ARTIFACT_FILE"
+          TEMPLATE=$(gcloud compute instance-groups managed describe ${{ secrets.MIG_NAME }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='get(instanceTemplate)')
 
-          # Artifact 전송
-          gcloud compute scp "$ARTIFACT_FILE" \
-            ${{ env.GCP_INSTANCE }}:/tmp/ai-server-deploy.tar.gz \
-            --zone=${{ env.GCP_ZONE }}
+          # 전체 URL → 이름만 추출
+          TEMPLATE_NAME=$(echo "$TEMPLATE" | rev | cut -d'/' -f1 | rev)
+          echo "template_name=$TEMPLATE_NAME" >> $GITHUB_OUTPUT
+          echo "Current template: $TEMPLATE_NAME"
 
-          # VM에서 배포 실행
-          gcloud compute ssh ${{ env.GCP_INSTANCE }} \
-            --zone=${{ env.GCP_ZONE }} \
-            --command='
-              set -e
+      - name: Create New Instance Template
+        id: new_template
+        run: |
+          TAG="${{ needs.set-env.outputs.image_tag }}"
+          CURRENT_TPL="${{ steps.current.outputs.template_name }}"
+          NEW_TEMPLATE="${{ secrets.MIG_NAME }}-${TAG}"
+          echo "new_template=$NEW_TEMPLATE" >> $GITHUB_OUTPUT
 
-              # uv 설치 (없는 경우)
-              if ! command -v uv &> /dev/null; then
-                echo "Installing uv..."
-                curl -LsSf https://astral.sh/uv/install.sh | sh
-              fi
-              export PATH="$HOME/.local/bin:$PATH"
+          # startup-script를 파일로 추출 (--metadata-from-file 사용)
+          gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(properties.metadata.items.filter(key="startup-script").extract(value).flatten())' > /tmp/startup.sh
 
-              # 서비스 중단
-              sudo systemctl stop ai-server || true
+          # 현재 템플릿 속성 추출
+          MACHINE_TYPE=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(properties.machineType)')
+          DISK_SIZE=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(properties.disks[0].initializeParams.diskSizeGb)')
+          DISK_TYPE=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(properties.disks[0].initializeParams.diskType)')
+          BOOT_IMAGE=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(properties.disks[0].initializeParams.sourceImage)')
+          SUBNET=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(properties.networkInterfaces[0].subnetwork)')
+          SA_EMAIL=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(properties.serviceAccounts[0].email)')
+          TAGS=$(gcloud compute instance-templates describe "$CURRENT_TPL" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='csv[no-heading](properties.tags.items)')
 
-              # 배포
-              sudo mkdir -p /app/ai-server
-              sudo tar -xzf /tmp/ai-server-deploy.tar.gz -C /app/ai-server
+          echo "Extracted from $CURRENT_TPL:"
+          echo "  machineType=$MACHINE_TYPE, diskSize=$DISK_SIZE, diskType=$DISK_TYPE"
+          echo "  subnet=$SUBNET, sa=$SA_EMAIL, tags=$TAGS"
 
-              # 권한 설정 (uv sync 전에 먼저 설정)
-              sudo chown -R $(whoami):$(whoami) /app/ai-server
+          gcloud compute instance-templates create "$NEW_TEMPLATE" \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --machine-type="$MACHINE_TYPE" \
+            --boot-disk-size="${DISK_SIZE}GB" \
+            --boot-disk-type="$DISK_TYPE" \
+            --image="$BOOT_IMAGE" \
+            --subnet="$SUBNET" \
+            --no-address \
+            --service-account="$SA_EMAIL" \
+            --scopes=cloud-platform \
+            --tags="$TAGS" \
+            --metadata=enable-oslogin=TRUE \
+            --metadata-from-file=startup-script=/tmp/startup.sh
 
-              # uv sync (uv.lock 변경 시에만 재설치)
-              cd /app/ai-server
-              NEW_HASH=$(md5sum uv.lock | cut -d" " -f1)
-              OLD_HASH=""
-              if [ -f ".venv/.uv_lock_hash" ]; then
-                OLD_HASH=$(cat .venv/.uv_lock_hash)
-              fi
+          echo "Created template: $NEW_TEMPLATE"
 
-              if [ "$NEW_HASH" != "$OLD_HASH" ] || [ ! -d ".venv" ]; then
-                echo "uv.lock changed or .venv missing, installing..."
-                rm -rf .venv
-                $HOME/.local/bin/uv sync --frozen
-                echo "$NEW_HASH" > .venv/.uv_lock_hash
-                echo "Dependencies installed"
-              else
-                echo "uv.lock unchanged, skipping dependency install"
-              fi
+      - name: Start MIG Rolling Update
+        run: |
+          echo "Starting rolling update..."
+          gcloud compute instance-groups managed rolling-action start-update \
+            ${{ secrets.MIG_NAME }} \
+            --version=template=${{ steps.new_template.outputs.new_template }} \
+            --max-surge=1 \
+            --max-unavailable=0 \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }}
 
-              # 서비스 시작
-              sudo systemctl start ai-server
+      - name: Wait for Rollout
+        run: |
+          echo "Waiting for MIG rollout to complete..."
+          gcloud compute instance-groups managed wait-until ${{ secrets.MIG_NAME }} \
+            --version-target-reached \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --timeout=600
 
-              # 정리
-              rm -f /tmp/ai-server-deploy.tar.gz
-            '
+          echo "Rollout completed successfully"
 
-      - name: Health Check
+      - name: Health Check (via IAP)
         id: healthcheck
         run: |
-          EXTERNAL_IP=$(gcloud compute instances describe ${{ env.GCP_INSTANCE }} \
-            --zone=${{ env.GCP_ZONE }} \
-            --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+          # MIG의 인스턴스 이름 획득
+          INSTANCE=$(gcloud compute instance-groups managed list-instances \
+            ${{ secrets.MIG_NAME }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format='value(instance)' | head -1)
 
-          echo "Health check: http://$EXTERNAL_IP:8000/health"
+          echo "Checking instance: $INSTANCE"
 
           for i in {1..12}; do
-            if curl -s -f "http://$EXTERNAL_IP:8000/health" > /dev/null; then
-              echo "Health check passed"
+            RESULT=$(gcloud compute ssh "$INSTANCE" \
+              --zone=${{ secrets.GCP_ZONE }} \
+              --project=${{ secrets.GCP_PROJECT_ID }} \
+              --tunnel-through-iap \
+              --command='curl -sf http://localhost:8000/health' 2>/dev/null || echo "")
+
+            if [ -n "$RESULT" ]; then
+              echo "Health check passed: $RESULT"
               echo "status=success" >> $GITHUB_OUTPUT
               exit 0
             fi
-            echo "Attempt $i/12 - Waiting..."
-            sleep 5
+            echo "Attempt $i/12 — waiting 10s..."
+            sleep 10
           done
 
-          echo "Health check failed"
-          echo "status=failed" >> $GITHUB_OUTPUT
-          exit 1
+          echo "::warning::Health check did not pass within timeout"
+          echo "status=timeout" >> $GITHUB_OUTPUT
 
-      - name: Remove Firewall Rule
+      - name: Cleanup Old Templates
         if: always()
         run: |
-          gcloud compute firewall-rules delete github-actions-temp-${{ github.run_id }} \
-            --project=${{ env.GCP_PROJECT_ID }} \
-            --quiet || true
-          echo "Firewall rule removed"
+          # 최신 3개 제외, 나머지 오래된 템플릿 정리
+          OLD_TEMPLATES=$(gcloud compute instance-templates list \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --filter="name~'^${{ secrets.MIG_NAME }}-'" \
+            --sort-by=~creationTimestamp \
+            --format='value(name)' | tail -n +4)
+
+          for TPL in $OLD_TEMPLATES; do
+            echo "Deleting old template: $TPL"
+            gcloud compute instance-templates delete "$TPL" \
+              --project=${{ secrets.GCP_PROJECT_ID }} --quiet || true
+          done
+
+      - name: Deploy Summary
+        if: always()
+        run: |
+          echo "### Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ needs.set-env.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ needs.build-push.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Template**: ${{ steps.new_template.outputs.new_template }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **MIG**: ${{ secrets.MIG_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health**: ${{ steps.healthcheck.outputs.status || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+
+# ============================================
+# 향후 확장 포인트
+# ============================================
+# post-deploy-test:
+#   name: Post-Deploy Verification
+#   if: needs.set-env.outputs.should_deploy == 'true'
+#   needs: [set-env, deploy]
+#   runs-on: ubuntu-22.04
+#   environment: ${{ needs.set-env.outputs.environment }}
+#   steps:
+#     - name: Health Check / LLM-as-a-judge / e2e test
+#       run: echo "TODO: post-deploy verification"

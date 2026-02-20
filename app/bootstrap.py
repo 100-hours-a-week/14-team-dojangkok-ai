@@ -1,3 +1,4 @@
+# v2: Docker + MIG rolling update 배포 방식 적용
 from dataclasses import dataclass
 
 import httpx
