@@ -15,8 +15,11 @@ setup_json_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.container = await create_container()
-    yield
-    await app.state.container.aclose()
+    await app.state.container.startup()
+    try:
+        yield
+    finally:
+        await app.state.container.aclose()
 
 
 app = FastAPI(
