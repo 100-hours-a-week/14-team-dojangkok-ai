@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+from collections.abc import Callable
 from typing import TypedDict, List, Dict, Any
 
 from langgraph.graph import StateGraph, END
@@ -12,8 +13,14 @@ from app.utils.upstage_html import extract_plain_text_from_upstage_json
 from app.settings import settings
 
 
+class EasyContractCancelled(Exception):
+    pass
+
+
 class EasyContractState(TypedDict, total=False):
     case_id: int
+    job_id: str
+    is_cancelled: Callable[[str], bool]
     # 입력 파일들(각각 bytes + doc_type)
     docs: List[Dict[str, Any]]  # {"filename": str, "bytes": bytes, "doc_type": str}
 
@@ -83,11 +90,20 @@ class EasyContractService:
     def _build_graph(self):
         g = StateGraph(EasyContractState)
 
+        def _check_cancel(state: EasyContractState) -> None:
+            job_id = (state.get("job_id") or "").strip()
+            if not job_id:
+                return
+            checker = state.get("is_cancelled")
+            if checker and checker(job_id):
+                raise EasyContractCancelled(f"job_id={job_id}")
+
         async def ocr_stage(state: EasyContractState) -> EasyContractState:
-            logger.info("계약서 ocr stage")
+            logger.info("계약서 ocr 단계 시작")
             pages_text: list[dict[str, Any]] = []
 
             for doc in state["docs"]:
+                _check_cancel(state)
                 filename = doc["filename"]
                 doc_type = doc["doc_type"]
                 b = doc["bytes"]
@@ -95,25 +111,27 @@ class EasyContractService:
                 if filename.lower().endswith(".pdf"):
                     from app.utils.pdf_images import pdf_bytes_to_png_pages
                     try:
-                        logger.info("pdf 이미지 변환중")
+                        logger.info("pdf 이미지 변환 중")
                         page_images = pdf_bytes_to_png_pages(b, zoom=2.0)
-                        logger.info("pdf 이미지 변환완료")
+                        logger.info("pdf 이미지 변환 완료")
                     except Exception as e:
                         raise RuntimeError("UNPROCESSABLE_DOCUMENT") from e
 
                     for i, img in enumerate(page_images, start=1):
-                        logger.info("이미지로 변환 후 ocr 요청")
+                        _check_cancel(state)
+                        logger.info("이미지 변환 후 ocr 요청")
                         data = await self.ocr.parse_image(img, filename=f"{filename}.p{i}.png")
                         logger.info("ocr 완료 후 텍스트 추출")
                         text = extract_plain_text_from_upstage_json(data)
-                        logger.debug("OCR 결과", extra={"text_length": len(text)})
+                        logger.debug("ocr 결과", extra={"text_length": len(text)})
                         pages_text.append({"doc_type": doc_type, "file": filename, "page": i, "text": text})
                 else:
+                    _check_cancel(state)
                     logger.info("ocr 요청")
                     data = await self.ocr.parse_image(b, filename=filename)
                     logger.info("ocr 완료 후 텍스트 추출")
                     text = extract_plain_text_from_upstage_json(data)
-                    logger.debug("OCR 결과", extra={"text_length": len(text)})
+                    logger.debug("ocr 결과", extra={"text_length": len(text)})
                     pages_text.append({"doc_type": doc_type, "file": filename, "page": 1, "text": text})
 
             state["pages_text"] = pages_text
@@ -123,6 +141,7 @@ class EasyContractService:
             logger.info("계약서 페이지별 요약 시작")
             summaries: list[dict[str, Any]] = []
             for p in state.get("pages_text", []):
+                _check_cancel(state)
                 txt = (p.get("text") or "").strip()
                 if not txt:
                     continue
@@ -144,6 +163,7 @@ class EasyContractService:
             return state
 
         async def final_stage(state: EasyContractState) -> EasyContractState:
+            _check_cancel(state)
             msgs = _final_markdown_prompt(state.get("page_summaries", []))
             logger.info("쉬운계약서 생성 요청")
             md = await self.vllm.chat(
@@ -168,8 +188,21 @@ class EasyContractService:
 
         return g.compile()
 
-    async def generate(self, case_id: int, docs: list[dict[str, Any]]) -> str:
+    async def generate(
+        self,
+        case_id: int,
+        docs: list[dict[str, Any]],
+        *,
+        job_id: str | None = None,
+        is_cancelled: Callable[[str], bool] | None = None,
+    ) -> str:
         logger.info("쉬운 계약서 시작", extra={"case_id": case_id})
-        out = await self.graph.ainvoke({"case_id": case_id, "docs": docs})
+        state: EasyContractState = {"case_id": case_id, "docs": docs}
+        if job_id:
+            state["job_id"] = job_id
+        if is_cancelled:
+            state["is_cancelled"] = is_cancelled
+
+        out = await self.graph.ainvoke(state)
         logger.info("쉬운 계약서 마크다운 생성 완료", extra={"case_id": case_id, "length": len(out.get("markdown", ""))})
         return out.get("markdown", "")

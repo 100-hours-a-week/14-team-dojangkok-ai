@@ -41,6 +41,7 @@ dependencies = [
     # huggingface-hub, peft, safetensors, torch,
     # transformers, trl, vllm
     "aiolimiter>=1.2.1",
+    "aio-pika>=9.6.1",
 ]
 
 [dependency-groups]
