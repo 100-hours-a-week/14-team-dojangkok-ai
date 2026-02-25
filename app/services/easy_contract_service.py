@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 from app.resources.vllm.client import VLLMClient
 from app.resources.ocr.upstage_client import UpstageDocumentParseClient
+from app.resources.rabbitmq.codec import now_utc_iso
 from app.utils.upstage_html import extract_plain_text_from_upstage_json
 from app.settings import settings
 
@@ -18,9 +19,9 @@ class EasyContractCancelled(Exception):
 
 
 class EasyContractState(TypedDict, total=False):
-    case_id: int
-    job_id: str
-    is_cancelled: Callable[[str], bool]
+    easy_contract_id: int
+    correlation_id: str
+    is_cancelled: Callable[[int], bool]
     # 입력 파일들(각각 bytes + doc_type)
     docs: List[Dict[str, Any]]  # {"filename": str, "bytes": bytes, "doc_type": str}
 
@@ -47,7 +48,7 @@ def _page_summary_prompt(doc_type: str, page_no: int, text: str) -> list[dict[st
         f"[문서타입] {doc_type}\n"
         f"[페이지] {page_no}\n"
         f"[OCR 텍스트]\n{text}\n\n"
-        "이 페이지에서 중요한 조항과 날계약일/임대차기간/보증금/월세/관리비/특약/위약금/해지조건/수리·하자/원상복구만 불릿으로 정리해줘.\n"
+        "이 페이지에서 중요한 조항과 계약일/임대차기간/보증금/월세/관리비/특약/위약금/해지조건/수리·하자/원상복구만 불릿으로 정리해줘.\n"
         "반드시 OCR 텍스트에 제시된 내용을 정리하고 없는 정보를 만들어내지 마라.\n"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -91,15 +92,24 @@ class EasyContractService:
         g = StateGraph(EasyContractState)
 
         def _check_cancel(state: EasyContractState) -> None:
-            job_id = (state.get("job_id") or "").strip()
-            if not job_id:
+            easy_contract_id = state.get("easy_contract_id")
+            if easy_contract_id is None:
                 return
             checker = state.get("is_cancelled")
-            if checker and checker(job_id):
-                raise EasyContractCancelled(f"job_id={job_id}")
+            if checker and checker(easy_contract_id):
+                raise EasyContractCancelled(f"easy_contract_id={easy_contract_id}")
+
+        def _log_extra(state: EasyContractState, **kwargs: Any) -> dict[str, Any]:
+            extra = {
+                "easy_contract_id": state.get("easy_contract_id"),
+                "correlation_id": state.get("correlation_id"),
+                "event_time": now_utc_iso(),
+            }
+            extra.update(kwargs)
+            return extra
 
         async def ocr_stage(state: EasyContractState) -> EasyContractState:
-            logger.info("계약서 ocr 단계 시작")
+            logger.info("계약서 문자 인식 단계 시작", extra=_log_extra(state))
             pages_text: list[dict[str, Any]] = []
 
             for doc in state["docs"]:
@@ -111,34 +121,49 @@ class EasyContractService:
                 if filename.lower().endswith(".pdf"):
                     from app.utils.pdf_images import pdf_bytes_to_png_pages
                     try:
-                        logger.info("pdf 이미지 변환 중")
+                        logger.info("pdf 이미지 변환 중", extra=_log_extra(state, filename=filename))
                         page_images = pdf_bytes_to_png_pages(b, zoom=2.0)
-                        logger.info("pdf 이미지 변환 완료")
+                        logger.info(
+                            "pdf 이미지 변환 완료",
+                            extra=_log_extra(state, filename=filename, page_count=len(page_images)),
+                        )
                     except Exception as e:
                         raise RuntimeError("UNPROCESSABLE_DOCUMENT") from e
 
                     for i, img in enumerate(page_images, start=1):
                         _check_cancel(state)
-                        logger.info("이미지 변환 후 ocr 요청")
+                        logger.info(
+                            "이미지 변환 후 문자 인식 요청",
+                            extra=_log_extra(state, filename=filename, page=i),
+                        )
                         data = await self.ocr.parse_image(img, filename=f"{filename}.p{i}.png")
-                        logger.info("ocr 완료 후 텍스트 추출")
+                        logger.info(
+                            "문자 인식 완료 후 텍스트 추출",
+                            extra=_log_extra(state, filename=filename, page=i),
+                        )
                         text = extract_plain_text_from_upstage_json(data)
-                        logger.debug("ocr 결과", extra={"text_length": len(text)})
+                        logger.debug(
+                            "문자 인식 결과",
+                            extra=_log_extra(state, filename=filename, page=i, text_length=len(text)),
+                        )
                         pages_text.append({"doc_type": doc_type, "file": filename, "page": i, "text": text})
                 else:
                     _check_cancel(state)
-                    logger.info("ocr 요청")
+                    logger.info("문자 인식 요청", extra=_log_extra(state, filename=filename, page=1))
                     data = await self.ocr.parse_image(b, filename=filename)
-                    logger.info("ocr 완료 후 텍스트 추출")
+                    logger.info("문자 인식 완료 후 텍스트 추출", extra=_log_extra(state, filename=filename, page=1))
                     text = extract_plain_text_from_upstage_json(data)
-                    logger.debug("ocr 결과", extra={"text_length": len(text)})
+                    logger.debug(
+                        "문자 인식 결과",
+                        extra=_log_extra(state, filename=filename, page=1, text_length=len(text)),
+                    )
                     pages_text.append({"doc_type": doc_type, "file": filename, "page": 1, "text": text})
 
             state["pages_text"] = pages_text
             return state
 
         async def page_summarize_stage(state: EasyContractState) -> EasyContractState:
-            logger.info("계약서 페이지별 요약 시작")
+            logger.info("계약서 페이지별 요약 시작", extra=_log_extra(state))
             summaries: list[dict[str, Any]] = []
             for p in state.get("pages_text", []):
                 _check_cancel(state)
@@ -147,14 +172,20 @@ class EasyContractService:
                     continue
 
                 msgs = _page_summary_prompt(p["doc_type"], p["page"], txt[:20000])
-                logger.info("계약서 요약중")
+                logger.info(
+                    "계약서 페이지 요약 요청",
+                    extra=_log_extra(state, filename=p["file"], page=p["page"]),
+                )
                 summary = await self.vllm.chat(
                     msgs,
                     temperature=0.2,
                     max_tokens=1024,
                     model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
                 )
-                logger.debug("계약서 요약 결과", extra={"summary_length": len(summary)})
+                logger.debug(
+                    "계약서 페이지 요약 완료",
+                    extra=_log_extra(state, filename=p["file"], page=p["page"], summary_length=len(summary)),
+                )
                 summaries.append(
                     {"doc_type": p["doc_type"], "file": p["file"], "page": p["page"], "summary": summary.strip()}
                 )
@@ -165,16 +196,16 @@ class EasyContractService:
         async def final_stage(state: EasyContractState) -> EasyContractState:
             _check_cancel(state)
             msgs = _final_markdown_prompt(state.get("page_summaries", []))
-            logger.info("쉬운계약서 생성 요청")
+            logger.info("쉬운계약서 생성 요청", extra=_log_extra(state))
             md = await self.vllm.chat(
                 msgs,
                 temperature=0.2,
                 max_tokens=2048,
                 model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
             )
-            logger.info("쉬운계약서 생성 완료")
+            logger.info("쉬운계약서 생성 완료", extra=_log_extra(state))
             state["markdown"] = md.strip()
-            logger.debug("마크다운 생성 완료", extra={"length": len(state["markdown"])})
+            logger.debug("마크다운 생성 완료", extra=_log_extra(state, length=len(state["markdown"])))
             return state
 
         g.add_node("ocr", ocr_stage)
@@ -190,19 +221,34 @@ class EasyContractService:
 
     async def generate(
         self,
-        case_id: int,
+        easy_contract_id: int,
         docs: list[dict[str, Any]],
         *,
-        job_id: str | None = None,
-        is_cancelled: Callable[[str], bool] | None = None,
+        correlation_id: str | None = None,
+        is_cancelled: Callable[[int], bool] | None = None,
     ) -> str:
-        logger.info("쉬운 계약서 시작", extra={"case_id": case_id})
-        state: EasyContractState = {"case_id": case_id, "docs": docs}
-        if job_id:
-            state["job_id"] = job_id
+        logger.info(
+            "쉬운 계약서 생성 시작",
+            extra={
+                "easy_contract_id": easy_contract_id,
+                "correlation_id": correlation_id,
+                "event_time": now_utc_iso(),
+            },
+        )
+        state: EasyContractState = {"easy_contract_id": easy_contract_id, "docs": docs}
+        if correlation_id:
+            state["correlation_id"] = correlation_id
         if is_cancelled:
             state["is_cancelled"] = is_cancelled
 
         out = await self.graph.ainvoke(state)
-        logger.info("쉬운 계약서 마크다운 생성 완료", extra={"case_id": case_id, "length": len(out.get("markdown", ""))})
+        logger.info(
+            "쉬운 계약서 생성 완료",
+            extra={
+                "easy_contract_id": easy_contract_id,
+                "correlation_id": correlation_id,
+                "length": len(out.get("markdown", "")),
+                "event_time": now_utc_iso(),
+            },
+        )
         return out.get("markdown", "")

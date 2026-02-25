@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import httpx
 from aio_pika.abc import AbstractIncomingMessage
 
-from app.resources.rabbitmq.codec import decode_json_message, parse_easy_contract_request
+from app.resources.rabbitmq.codec import decode_json_message, now_utc_iso, parse_easy_contract_request
 from app.resources.rabbitmq.result_publisher import RabbitMQResultPublisher
 from app.services.cancel_registry import CancelRegistry
 from app.services.easy_contract_service import EasyContractCancelled, EasyContractService
@@ -31,44 +31,103 @@ class EasyContractMessageHandler:
         self.cancel_registry = cancel_registry
 
     async def handle(self, message: AbstractIncomingMessage) -> None:
-        job_id = self._fallback_job_id(message)
-        result_status = "FAILED"
-        result_data: dict[str, Any] | None = None
-        result_error: dict[str, str] | None = {"code": "FAILED", "message": "쉬운 계약서 생성 중 오류가 발생했습니다."}
+        correlation_id = self._fallback_correlation_id(message)
+        easy_contract_id = -1
+        member_id = -1
+        success = False
+        content: str | None = None
+        error_message: str | None = "쉬운 계약서 생성 중 오류가 발생했습니다."
+        cancelled = False
+
+        logger.info(
+            "쉬운 계약서 요청 메시지 수신",
+            extra={
+                "correlation_id": correlation_id,
+                "easy_contract_id": easy_contract_id,
+                "member_id": member_id,
+                "event_time": now_utc_iso(),
+            },
+        )
 
         try:
             payload = decode_json_message(message.body)
+            correlation_id = self._extract_str_candidate(payload, "correlation_id", correlation_id)
+            easy_contract_id = self._extract_int_candidate(payload, "easy_contract_id", easy_contract_id)
+            member_id = self._extract_int_candidate(payload, "member_id", member_id)
             request = parse_easy_contract_request(payload)
-            job_id = self._extract_job_id(request, message)
-            case_id = self._extract_case_id(request)
+            correlation_id = request["correlation_id"]
+            easy_contract_id = request["easy_contract_id"]
+            member_id = request["member_id"]
             docs = await self._extract_docs(request)
 
-            markdown = await self.easy_contract_service.generate(
-                case_id=case_id,
-                docs=docs,
-                job_id=job_id,
-                is_cancelled=self.cancel_registry.is_cancelled,
-            )
-            result_status = "SUCCESS"
-            result_data = {"markdown": markdown}
-            result_error = None
+            if self.cancel_registry.is_cancelled(easy_contract_id):
+                cancelled = True
+                logger.info(
+                    "쉬운 계약서 생성 시작 전 취소 감지",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "easy_contract_id": easy_contract_id,
+                        "member_id": member_id,
+                        "event_time": now_utc_iso(),
+                    },
+                )
+
+            if not cancelled:
+                markdown = await self.easy_contract_service.generate(
+                    easy_contract_id=easy_contract_id,
+                    docs=docs,
+                    correlation_id=correlation_id,
+                    is_cancelled=self.cancel_registry.is_cancelled,
+                )
+                if self.cancel_registry.is_cancelled(easy_contract_id):
+                    cancelled = True
+                    logger.info(
+                        "쉬운 계약서 생성 완료 후 응답 발행 직전 취소 감지",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "easy_contract_id": easy_contract_id,
+                            "member_id": member_id,
+                            "event_time": now_utc_iso(),
+                        },
+                    )
+                else:
+                    success = True
+                    content = markdown
+                    error_message = None
 
         except EasyContractCancelled:
-            result_status = "CANCELLED"
-            result_data = None
-            result_error = {"code": "CANCELLED", "message": "쉬운 계약서 생성이 취소되었습니다."}
+            cancelled = True
         except ValueError as exc:
-            result_status = "FAILED"
-            result_data = None
-            result_error = {"code": "INVALID_INPUT", "message": str(exc)}
+            success = False
+            content = None
+            error_message = str(exc)
         except Exception:
             logger.exception("쉬운 계약서 메시지 처리 실패")
 
+        if easy_contract_id >= 0 and self.cancel_registry.is_cancelled(easy_contract_id):
+            cancelled = True
+
+        if cancelled:
+            logger.info(
+                "취소된 쉬운 계약서 요청으로 응답 메시지 발행 생략",
+                extra={
+                    "correlation_id": correlation_id,
+                    "easy_contract_id": easy_contract_id,
+                    "member_id": member_id,
+                    "event_time": now_utc_iso(),
+                },
+            )
+            if not message.processed:
+                await message.ack()
+            return
+
         publish_ok = await self._publish_result(
-            job_id=job_id,
-            status=result_status,
-            data=result_data,
-            error=result_error,
+            correlation_id=correlation_id,
+            easy_contract_id=easy_contract_id,
+            member_id=member_id,
+            success=success,
+            content=content,
+            error_message=error_message,
             message=message,
         )
         if publish_ok and not message.processed:
@@ -79,74 +138,72 @@ class EasyContractMessageHandler:
     async def _publish_result(
         self,
         *,
-        job_id: str,
-        status: str,
-        data: dict[str, Any] | None,
-        error: dict[str, str] | None,
+        correlation_id: str,
+        easy_contract_id: int,
+        member_id: int,
+        success: bool,
+        content: str | None,
+        error_message: str | None,
         message: AbstractIncomingMessage,
     ) -> bool:
         try:
-            await self.result_publisher.publish_result(
-                job_id=job_id,
-                result_type="contract",
-                status=status,
-                data=data,
-                error=error,
-                correlation_id=message.correlation_id or job_id,
+            await self.result_publisher.publish_easy_contract_result(
+                correlation_id=correlation_id,
+                easy_contract_id=easy_contract_id,
+                member_id=member_id,
+                success=success,
+                content=content,
+                error_message=error_message,
                 message_id=message.message_id,
+            )
+            logger.info(
+                "쉬운 계약서 결과 메시지 발행 완료",
+                extra={
+                    "correlation_id": correlation_id,
+                    "easy_contract_id": easy_contract_id,
+                    "member_id": member_id,
+                    "success": success,
+                    "event_time": now_utc_iso(),
+                },
             )
             return True
         except Exception:
-            logger.exception("쉬운 계약서 결과 발행 실패", extra={"job_id": job_id, "status": status})
+            logger.exception(
+                "쉬운 계약서 결과 발행 실패",
+                extra={
+                    "correlation_id": correlation_id,
+                    "easy_contract_id": easy_contract_id,
+                    "member_id": member_id,
+                    "success": success,
+                    "event_time": now_utc_iso(),
+                },
+            )
             return False
 
-    def _extract_job_id(self, request: dict[str, Any], message: AbstractIncomingMessage) -> str:
-        raw = request.get("job_id")
-        if raw is None:
-            return self._fallback_job_id(message)
-        job_id = str(raw).strip()
-        if not job_id:
-            return self._fallback_job_id(message)
-        return job_id
-
-    def _fallback_job_id(self, message: AbstractIncomingMessage) -> str:
+    def _fallback_correlation_id(self, message: AbstractIncomingMessage) -> str:
         return str(message.correlation_id or message.message_id or "unknown")
 
-    def _extract_case_id(self, request: dict[str, Any]) -> int:
-        raw = request.get("case_id", request.get("id", -1))
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return -1
+    def _extract_str_candidate(self, payload: dict[str, Any], key: str, default: str) -> str:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return default
+
+    def _extract_int_candidate(self, payload: dict[str, Any], key: str, default: int) -> int:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return value
+        return default
 
     async def _extract_docs(self, request: dict[str, Any]) -> list[dict[str, Any]]:
-        files = request.get("files")
-        normalized_files: list[dict[str, Any]] = []
-
-        if isinstance(files, list) and files:
-            for item in files:
-                if not isinstance(item, dict):
-                    raise ValueError("files는 객체 배열이어야 합니다.")
-                normalized_files.append(item)
-        else:
-            single_url = request.get("file_url") or request.get("url")
-            single_doc_type = request.get("file_type") or request.get("doc_type")
-            if single_url and single_doc_type:
-                normalized_files.append({"url": single_url, "doc_type": single_doc_type})
-
-        if not normalized_files:
-            raise ValueError("files 또는 file_url/doc_type 값이 필요합니다.")
-
+        normalized_files = request["files"]
         docs: list[dict[str, Any]] = []
         for idx, file_meta in enumerate(normalized_files, start=1):
-            url = str(file_meta.get("url") or file_meta.get("file_url") or "").strip()
-            if not url:
-                raise ValueError("파일 URL이 누락되었습니다.")
-            doc_type = str(file_meta.get("doc_type") or file_meta.get("file_type") or "").strip()
-            if not doc_type:
-                raise ValueError("doc_type(file_type)이 누락되었습니다.")
-
-            filename = str(file_meta.get("filename") or self._filename_from_url(url) or f"file_{idx}").strip()
+            url = file_meta["url"]
+            doc_type = file_meta["doc_type"]
+            filename = file_meta["filename"] or self._filename_from_url(url) or f"file_{idx}"
             file_bytes = await self._download(url)
             if not file_bytes:
                 raise ValueError("비어있는 파일은 처리할 수 없습니다.")

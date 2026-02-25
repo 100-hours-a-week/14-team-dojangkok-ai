@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.resources.rabbitmq.client import RabbitMQClient
-from app.resources.rabbitmq.codec import build_result_payload
+from app.resources.rabbitmq.codec import (
+    build_checklist_result_payload,
+    build_easy_contract_result_payload,
+)
 
 
 class RabbitMQResultPublisher:
@@ -31,29 +34,58 @@ class RabbitMQResultPublisher:
             headers=headers,
         )
 
-    async def publish_result(
+    async def publish_easy_contract_result(
         self,
         *,
-        job_id: str,
-        result_type: str,
-        status: str,
-        data: dict[str, Any] | None = None,
-        error: dict[str, Any] | None = None,
+        correlation_id: str,
+        easy_contract_id: int,
+        member_id: int,
+        success: bool,
+        content: str | None,
+        error_message: str | None,
         message_id: str | None = None,
-        correlation_id: str | None = None,
         headers: dict[str, Any] | None = None,
     ) -> None:
-        payload = build_result_payload(
-            job_id=job_id,
-            result_type=result_type,
-            status=status,
-            data=data,
-            error=error,
+        payload = build_easy_contract_result_payload(
+            correlation_id=correlation_id,
+            easy_contract_id=easy_contract_id,
+            member_id=member_id,
+            success=success,
+            content=content,
+            error_message=error_message,
         )
         await self.publish(
             payload,
             message_id=message_id,
             correlation_id=correlation_id,
-            message_type=result_type,
+            message_type="easy-contract",
+            headers=headers,
+        )
+
+    async def publish_checklist_result(
+        self,
+        *,
+        correlation_id: str,
+        template_id: int,
+        member_id: int,
+        success: bool,
+        checklists: list[str],
+        error_message: str | None,
+        message_id: str | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        payload = build_checklist_result_payload(
+            correlation_id=correlation_id,
+            template_id=template_id,
+            member_id=member_id,
+            success=success,
+            checklists=checklists,
+            error_message=error_message,
+        )
+        await self.publish(
+            payload,
+            message_id=message_id,
+            correlation_id=correlation_id,
+            message_type="checklist",
             headers=headers,
         )

@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 
 logger = logging.getLogger(__name__)
 
+from app.resources.rabbitmq.codec import now_utc_iso
 from app.resources.vllm.client import VLLMClient
 from app.settings import settings
 
@@ -38,7 +39,7 @@ COMMON_CHECKLIST: list[str] = [
 
 
 class ChecklistState(TypedDict, total=False):
-    case_id: str
+    template_id: int | str
     keywords: list[str]
     checklists: list[str]
 
@@ -164,19 +165,29 @@ class ChecklistService:
 
         async def with_keywords(state: ChecklistState) -> ChecklistState:
             msgs = _build_prompt(state["keywords"], COMMON_CHECKLIST)
-            logger.info("체크리스트 생성 모델 요청")
+            logger.info(
+                "체크리스트 생성 모델 요청",
+                extra={"template_id": state.get("template_id"), "event_time": now_utc_iso()},
+            )
             content = await self.vllm.chat(
                 msgs,
                 temperature=0.2,
                 max_tokens=1024,
                 model=settings.VLLM_LORA_ADAPTER_CHECKLIST,
             )
-            logger.info("체크리스트 LLM 응답", extra={"content_length": len(content)})
+            logger.info(
+                "체크리스트 생성 모델 응답",
+                extra={
+                    "template_id": state.get("template_id"),
+                    "content_length": len(content),
+                    "event_time": now_utc_iso(),
+                },
+            )
             items = _parse_model_output(content)
 
             merged = []
             seen = set()
-            for x in COMMON_CHECKLIST + items:
+            for x in items + COMMON_CHECKLIST:
                 x2 = _clean_item(x)
                 if x2 and x2 not in seen:
                     seen.add(x2)
@@ -201,7 +212,14 @@ class ChecklistService:
 
         return g.compile()
 
-    async def generate(self, case_id: str, keywords: list[str]) -> list[str]:
-        out = await self.graph.ainvoke({"case_id": case_id, "keywords": keywords})
-        logger.info("체크리스트 생성 완료", extra={"case_id": case_id, "count": len(out.get("checklists", []))})
+    async def generate(self, template_id: int | str, keywords: list[str]) -> list[str]:
+        out = await self.graph.ainvoke({"template_id": template_id, "keywords": keywords})
+        logger.info(
+            "체크리스트 생성 완료",
+            extra={
+                "template_id": template_id,
+                "count": len(out.get("checklists", [])),
+                "event_time": now_utc_iso(),
+            },
+        )
         return out.get("checklists", COMMON_CHECKLIST)

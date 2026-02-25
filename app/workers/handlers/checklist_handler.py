@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from aio_pika.abc import AbstractIncomingMessage
 
-from app.resources.rabbitmq.codec import decode_json_message, parse_checklist_request
+from app.resources.rabbitmq.codec import decode_json_message, now_utc_iso, parse_checklist_request
 from app.resources.rabbitmq.result_publisher import RabbitMQResultPublisher
 from app.services.checklist_service import ChecklistService
 
@@ -23,34 +22,52 @@ class ChecklistMessageHandler:
         self.result_publisher = result_publisher
 
     async def handle(self, message: AbstractIncomingMessage) -> None:
-        job_id = self._fallback_job_id(message)
-        result_status = "FAILED"
-        result_data: dict[str, Any] | None = None
-        result_error: dict[str, str] | None = {"code": "FAILED", "message": "체크리스트 생성 중 오류가 발생했습니다."}
+        correlation_id = self._fallback_correlation_id(message)
+        template_id = -1
+        member_id = -1
+        success = False
+        checklists: list[str] = []
+        error_message: str | None = "체크리스트 생성 중 오류가 발생했습니다."
+
+        logger.info(
+            "체크리스트 요청 메시지 수신",
+            extra={
+                "correlation_id": correlation_id,
+                "template_id": template_id,
+                "member_id": member_id,
+                "event_time": now_utc_iso(),
+            },
+        )
 
         try:
             payload = decode_json_message(message.body)
+            correlation_id = self._extract_str_candidate(payload, "correlation_id", correlation_id)
+            template_id = self._extract_int_candidate(payload, "template_id", template_id)
+            member_id = self._extract_int_candidate(payload, "member_id", member_id)
             request = parse_checklist_request(payload)
-            job_id = self._extract_job_id(request, message)
-            keywords = self._extract_keywords(request)
+            correlation_id = request["correlation_id"]
+            template_id = request["template_id"]
+            member_id = request["member_id"]
+            keywords = request["keywords"]
 
-            checklists = await self.checklist_service.generate(case_id=job_id, keywords=keywords)
-            result_status = "SUCCESS"
-            result_data = {"checklists": checklists}
-            result_error = None
+            checklists = await self.checklist_service.generate(template_id=template_id, keywords=keywords)
+            success = True
+            error_message = None
 
         except ValueError as exc:
-            result_status = "FAILED"
-            result_data = None
-            result_error = {"code": "INVALID_INPUT", "message": str(exc)}
+            success = False
+            checklists = []
+            error_message = str(exc)
         except Exception:
             logger.exception("체크리스트 메시지 처리 실패")
 
         publish_ok = await self._publish_result(
-            job_id=job_id,
-            status=result_status,
-            data=result_data,
-            error=result_error,
+            correlation_id=correlation_id,
+            template_id=template_id,
+            member_id=member_id,
+            success=success,
+            checklists=checklists,
+            error_message=error_message,
             message=message,
         )
         if publish_ok and not message.processed:
@@ -61,43 +78,61 @@ class ChecklistMessageHandler:
     async def _publish_result(
         self,
         *,
-        job_id: str,
-        status: str,
-        data: dict[str, Any] | None,
-        error: dict[str, str] | None,
+        correlation_id: str,
+        template_id: int,
+        member_id: int,
+        success: bool,
+        checklists: list[str],
+        error_message: str | None,
         message: AbstractIncomingMessage,
     ) -> bool:
         try:
-            await self.result_publisher.publish_result(
-                job_id=job_id,
-                result_type="checklist",
-                status=status,
-                data=data,
-                error=error,
-                correlation_id=message.correlation_id or job_id,
+            await self.result_publisher.publish_checklist_result(
+                correlation_id=correlation_id,
+                template_id=template_id,
+                member_id=member_id,
+                success=success,
+                checklists=checklists,
+                error_message=error_message,
                 message_id=message.message_id,
+            )
+            logger.info(
+                "체크리스트 결과 메시지 발행 완료",
+                extra={
+                    "correlation_id": correlation_id,
+                    "template_id": template_id,
+                    "member_id": member_id,
+                    "success": success,
+                    "event_time": now_utc_iso(),
+                },
             )
             return True
         except Exception:
-            logger.exception("체크리스트 결과 발행 실패", extra={"job_id": job_id, "status": status})
+            logger.exception(
+                "체크리스트 결과 발행 실패",
+                extra={
+                    "correlation_id": correlation_id,
+                    "template_id": template_id,
+                    "member_id": member_id,
+                    "success": success,
+                    "event_time": now_utc_iso(),
+                },
+            )
             return False
 
-    def _extract_job_id(self, request: dict[str, Any], message: AbstractIncomingMessage) -> str:
-        raw = request.get("job_id")
-        if raw is None:
-            return self._fallback_job_id(message)
-        job_id = str(raw).strip()
-        if not job_id:
-            return self._fallback_job_id(message)
-        return job_id
-
-    def _fallback_job_id(self, message: AbstractIncomingMessage) -> str:
+    def _fallback_correlation_id(self, message: AbstractIncomingMessage) -> str:
         return str(message.correlation_id or message.message_id or "unknown")
 
-    def _extract_keywords(self, request: dict[str, Any]) -> list[str]:
-        keywords = request.get("keywords")
-        if keywords is None:
-            return []
-        if not isinstance(keywords, list) or any(not isinstance(x, str) for x in keywords):
-            raise ValueError("keywords는 문자열 배열이어야 합니다.")
-        return keywords
+    def _extract_str_candidate(self, payload: dict[str, object], key: str, default: str) -> str:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return default
+
+    def _extract_int_candidate(self, payload: dict[str, object], key: str, default: int) -> int:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return value
+        return default
