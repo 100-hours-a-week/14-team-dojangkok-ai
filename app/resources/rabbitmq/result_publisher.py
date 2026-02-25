@@ -23,8 +23,8 @@ class RabbitMQResultPublisher:
         correlation_id: str | None = None,
         message_type: str | None = None,
         headers: dict[str, Any] | None = None,
-    ) -> None:
-        await self.client.publish_json(
+    ) -> bool:
+        return await self.client.publish_json(
             exchange_name=self.exchange_name,
             routing_key=self.routing_key,
             payload=payload,
@@ -45,7 +45,7 @@ class RabbitMQResultPublisher:
         error_message: str | None,
         message_id: str | None = None,
         headers: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         payload = build_easy_contract_result_payload(
             correlation_id=correlation_id,
             easy_contract_id=easy_contract_id,
@@ -54,7 +54,7 @@ class RabbitMQResultPublisher:
             content=content,
             error_message=error_message,
         )
-        await self.publish(
+        return await self.publish(
             payload,
             message_id=message_id,
             correlation_id=correlation_id,
@@ -73,7 +73,7 @@ class RabbitMQResultPublisher:
         error_message: str | None,
         message_id: str | None = None,
         headers: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         payload = build_checklist_result_payload(
             correlation_id=correlation_id,
             template_id=template_id,
@@ -82,7 +82,7 @@ class RabbitMQResultPublisher:
             checklists=checklists,
             error_message=error_message,
         )
-        await self.publish(
+        return await self.publish(
             payload,
             message_id=message_id,
             correlation_id=correlation_id,

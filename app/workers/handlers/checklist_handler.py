@@ -73,7 +73,7 @@ class ChecklistMessageHandler:
         if publish_ok and not message.processed:
             await message.ack()
         elif not publish_ok and not message.processed:
-            await message.nack(requeue=True)
+            await message.nack(requeue=False)
 
     async def _publish_result(
         self,
@@ -87,7 +87,7 @@ class ChecklistMessageHandler:
         message: AbstractIncomingMessage,
     ) -> bool:
         try:
-            await self.result_publisher.publish_checklist_result(
+            publish_ok = await self.result_publisher.publish_checklist_result(
                 correlation_id=correlation_id,
                 template_id=template_id,
                 member_id=member_id,
@@ -96,6 +96,18 @@ class ChecklistMessageHandler:
                 error_message=error_message,
                 message_id=message.message_id,
             )
+            if not publish_ok:
+                logger.error(
+                    "체크리스트 결과 발행 실패(재시도 소진)",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "template_id": template_id,
+                        "member_id": member_id,
+                        "success": success,
+                        "event_time": now_utc_iso(),
+                    },
+                )
+                return False
             logger.info(
                 "체크리스트 결과 메시지 발행 완료",
                 extra={

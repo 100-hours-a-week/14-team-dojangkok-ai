@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -29,6 +30,9 @@ class QueueBinding:
 
 
 class RabbitMQClient:
+    _PUBLISH_MAX_RETRIES = 3
+    _PUBLISH_BACKOFF_BASE_SEC = 0.5
+
     def __init__(
         self,
         *,
@@ -44,11 +48,21 @@ class RabbitMQClient:
         self._queues: dict[str, AbstractQueue] = {}
 
     async def connect(self) -> None:
-        if self._connection is not None and not self._connection.is_closed:
+        if (
+            self._connection is not None
+            and not self._connection.is_closed
+            and self._channel is not None
+            and not self._channel.is_closed
+        ):
             return
 
-        self._connection = await aio_pika.connect_robust(self.url)
-        self._channel = await self._connection.channel()
+        if self._connection is None or self._connection.is_closed:
+            self._connection = await aio_pika.connect_robust(self.url)
+
+        self._channel = await self._connection.channel(
+            publisher_confirms=True,
+            on_return_raises=True,
+        )
         await self._channel.set_qos(prefetch_count=self.prefetch_count)
         logger.info(
             "래빗엠큐 연결 완료",
@@ -108,34 +122,76 @@ class RabbitMQClient:
         correlation_id: str | None = None,
         message_type: str | None = None,
         headers: dict[str, Any] | None = None,
-    ) -> None:
-        channel = self._require_channel()
-        exchange = await channel.declare_exchange(
-            exchange_name,
-            ExchangeType.DIRECT,
-            durable=True,
-            passive=self.declare_passive,
-        )
-        body = encode_json_message(payload)
-        message = Message(
-            body=body,
-            content_type="application/json",
-            content_encoding="utf-8",
-            delivery_mode=DeliveryMode.PERSISTENT,
-            message_id=message_id,
-            correlation_id=correlation_id,
-            type=message_type,
-            headers=headers,
-        )
-        await exchange.publish(message, routing_key=routing_key)
-        logger.info(
-            "래빗엠큐 메시지 발행 완료",
-            extra={
-                "exchange": exchange_name,
-                "routing_key": routing_key,
-                "payload_size": len(json.dumps(payload, ensure_ascii=False)),
-            },
-        )
+    ) -> bool:
+        payload_size = len(json.dumps(payload, ensure_ascii=False))
+
+        for attempt in range(1, self._PUBLISH_MAX_RETRIES + 1):
+            try:
+                if self._channel is None or self._channel.is_closed:
+                    await self.connect()
+
+                channel = self._require_channel()
+                exchange = await channel.declare_exchange(
+                    exchange_name,
+                    ExchangeType.DIRECT,
+                    durable=True,
+                    passive=self.declare_passive,
+                )
+                body = encode_json_message(payload)
+                message = Message(
+                    body=body,
+                    content_type="application/json",
+                    content_encoding="utf-8",
+                    delivery_mode=DeliveryMode.PERSISTENT,
+                    message_id=message_id,
+                    correlation_id=correlation_id,
+                    type=message_type,
+                    headers=headers,
+                )
+                await exchange.publish(message, routing_key=routing_key, mandatory=True)
+                logger.info(
+                    "래빗엠큐 메시지 발행 완료",
+                    extra={
+                        "exchange": exchange_name,
+                        "routing_key": routing_key,
+                        "payload_size": payload_size,
+                        "attempt": attempt,
+                        "publisher_confirms": True,
+                        "mandatory": True,
+                    },
+                )
+                return True
+            except Exception:
+                if attempt >= self._PUBLISH_MAX_RETRIES:
+                    logger.exception(
+                        "래빗엠큐 메시지 발행 최종 실패",
+                        extra={
+                            "exchange": exchange_name,
+                            "routing_key": routing_key,
+                            "payload_size": payload_size,
+                            "max_retries": self._PUBLISH_MAX_RETRIES,
+                            "publisher_confirms": True,
+                            "mandatory": True,
+                        },
+                    )
+                    return False
+
+                backoff_sec = self._PUBLISH_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+                logger.warning(
+                    "래빗엠큐 메시지 발행 실패, 재시도 예정",
+                    extra={
+                        "exchange": exchange_name,
+                        "routing_key": routing_key,
+                        "payload_size": payload_size,
+                        "attempt": attempt,
+                        "next_retry_in_sec": backoff_sec,
+                        "publisher_confirms": True,
+                        "mandatory": True,
+                    },
+                )
+                await asyncio.sleep(backoff_sec)
+
+        return False
 
     def _require_channel(self) -> AbstractRobustChannel:
         if self._channel is None:
