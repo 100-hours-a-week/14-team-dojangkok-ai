@@ -133,7 +133,7 @@ class EasyContractMessageHandler:
         if publish_ok and not message.processed:
             await message.ack()
         elif not publish_ok and not message.processed:
-            await message.nack(requeue=True)
+            await message.nack(requeue=False)
 
     async def _publish_result(
         self,
@@ -147,7 +147,7 @@ class EasyContractMessageHandler:
         message: AbstractIncomingMessage,
     ) -> bool:
         try:
-            await self.result_publisher.publish_easy_contract_result(
+            publish_ok = await self.result_publisher.publish_easy_contract_result(
                 correlation_id=correlation_id,
                 easy_contract_id=easy_contract_id,
                 member_id=member_id,
@@ -156,6 +156,18 @@ class EasyContractMessageHandler:
                 error_message=error_message,
                 message_id=message.message_id,
             )
+            if not publish_ok:
+                logger.error(
+                    "쉬운 계약서 결과 발행 실패(재시도 소진)",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "easy_contract_id": easy_contract_id,
+                        "member_id": member_id,
+                        "success": success,
+                        "event_time": now_utc_iso(),
+                    },
+                )
+                return False
             logger.info(
                 "쉬운 계약서 결과 메시지 발행 완료",
                 extra={

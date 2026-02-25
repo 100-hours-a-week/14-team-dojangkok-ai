@@ -121,11 +121,11 @@ class EasyContractService:
                 if filename.lower().endswith(".pdf"):
                     from app.utils.pdf_images import pdf_bytes_to_png_pages
                     try:
-                        logger.info("pdf 이미지 변환 중", extra=_log_extra(state, filename=filename))
+                        logger.info("pdf 이미지 변환 중", extra=_log_extra(state, doc_filename=filename))
                         page_images = pdf_bytes_to_png_pages(b, zoom=2.0)
                         logger.info(
                             "pdf 이미지 변환 완료",
-                            extra=_log_extra(state, filename=filename, page_count=len(page_images)),
+                            extra=_log_extra(state, doc_filename=filename, page_count=len(page_images)),
                         )
                     except Exception as e:
                         raise RuntimeError("UNPROCESSABLE_DOCUMENT") from e
@@ -134,28 +134,31 @@ class EasyContractService:
                         _check_cancel(state)
                         logger.info(
                             "이미지 변환 후 문자 인식 요청",
-                            extra=_log_extra(state, filename=filename, page=i),
+                            extra=_log_extra(state, doc_filename=filename, page=i),
                         )
                         data = await self.ocr.parse_image(img, filename=f"{filename}.p{i}.png")
                         logger.info(
                             "문자 인식 완료 후 텍스트 추출",
-                            extra=_log_extra(state, filename=filename, page=i),
+                            extra=_log_extra(state, doc_filename=filename, page=i),
                         )
                         text = extract_plain_text_from_upstage_json(data)
                         logger.debug(
                             "문자 인식 결과",
-                            extra=_log_extra(state, filename=filename, page=i, text_length=len(text)),
+                            extra=_log_extra(state, doc_filename=filename, page=i, text_length=len(text)),
                         )
                         pages_text.append({"doc_type": doc_type, "file": filename, "page": i, "text": text})
                 else:
                     _check_cancel(state)
-                    logger.info("문자 인식 요청", extra=_log_extra(state, filename=filename, page=1))
+                    logger.info("문자 인식 요청", extra=_log_extra(state, doc_filename=filename, page=1))
                     data = await self.ocr.parse_image(b, filename=filename)
-                    logger.info("문자 인식 완료 후 텍스트 추출", extra=_log_extra(state, filename=filename, page=1))
+                    logger.info(
+                        "문자 인식 완료 후 텍스트 추출",
+                        extra=_log_extra(state, doc_filename=filename, page=1),
+                    )
                     text = extract_plain_text_from_upstage_json(data)
                     logger.debug(
                         "문자 인식 결과",
-                        extra=_log_extra(state, filename=filename, page=1, text_length=len(text)),
+                        extra=_log_extra(state, doc_filename=filename, page=1, text_length=len(text)),
                     )
                     pages_text.append({"doc_type": doc_type, "file": filename, "page": 1, "text": text})
 
@@ -174,7 +177,7 @@ class EasyContractService:
                 msgs = _page_summary_prompt(p["doc_type"], p["page"], txt[:20000])
                 logger.info(
                     "계약서 페이지 요약 요청",
-                    extra=_log_extra(state, filename=p["file"], page=p["page"]),
+                    extra=_log_extra(state, doc_filename=p["file"], page=p["page"]),
                 )
                 summary = await self.vllm.chat(
                     msgs,
@@ -184,7 +187,7 @@ class EasyContractService:
                 )
                 logger.debug(
                     "계약서 페이지 요약 완료",
-                    extra=_log_extra(state, filename=p["file"], page=p["page"], summary_length=len(summary)),
+                    extra=_log_extra(state, doc_filename=p["file"], page=p["page"], summary_length=len(summary)),
                 )
                 summaries.append(
                     {"doc_type": p["doc_type"], "file": p["file"], "page": p["page"], "summary": summary.strip()}
