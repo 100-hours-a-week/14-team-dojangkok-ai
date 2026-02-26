@@ -16,6 +16,11 @@ from app.utils.upstage_html import extract_plain_text_from_upstage_json
 
 logger = logging.getLogger(__name__)
 
+OCR_PAGE_LIMITS_BY_DOC_TYPE: dict[str, int] = {
+    "contract": 10,
+    "registry": 5,
+}
+
 
 class EasyContractCancelled(Exception):
     pass
@@ -115,11 +120,11 @@ def _final_markdown_prompt(page_summaries: list[dict[str, Any]]) -> list[dict[st
         "1) 출력은 마크다운만 (설명문/코드블록 금지)\n"
         "2) 사실에 근거해 작성. 추측 금지\n"
         "3) 섹션 예시(필요한 것만 포함):\n"
-        "   - 요약(한 문단)\n"
+        "   - 요약(다섯 문장 이하, 불릿)\n"
         "   - 핵심 조건(표)\n"
         "   - 중요 조항(불릿)\n"
         "   - 위험/주의 포인트(불릿)\n"
-        "4) 금액/날짜/기간/당사자/주소 등은 가능한 한 원문 기반으로 명확히\n"
+        "4) 금액/날짜/기간/당사자/주소 등은 가능한 한 원문 기반으로 명확히하고 월세와 관리비가 모두 있으면 실제 월 납부금액을 핵심조건(표)에 표시\n"
         "5) 등기부등본 해석은 등기부에 기재된 사실만 설명\n"
         "6) 시세/시장가/향후 경매 가능성은 추측하지 말 것\n"
         "7) 위험성은 단정하지 말고 '가능성' 표현으로 제한할 것\n"
@@ -187,22 +192,40 @@ class EasyContractService:
         async def ocr_stage(state: EasyContractState) -> EasyContractState:
             logger.info("문서 문자 인식 단계 시작", extra=_log_extra(state))
             pages_text: list[dict[str, Any]] = []
+            remaining_pages_by_doc_type = OCR_PAGE_LIMITS_BY_DOC_TYPE.copy()
 
             for doc in state["docs"]:
                 _check_cancel(state)
                 filename = doc["filename"]
                 doc_type = _normalize_doc_type(doc["doc_type"])
                 b = doc["bytes"]
+                page_budget = remaining_pages_by_doc_type.get(doc_type)
+
+                if page_budget is not None and page_budget <= 0:
+                    logger.info(
+                        "문서 타입 OCR 페이지 상한 도달로 문서 스킵",
+                        extra=_log_extra(state, doc_filename=filename, doc_type=doc_type),
+                    )
+                    continue
 
                 if filename.lower().endswith(".pdf"):
                     from app.utils.pdf_images import pdf_bytes_to_png_pages
 
                     try:
                         logger.info("pdf 이미지 변환 중", extra=_log_extra(state, doc_filename=filename))
-                        page_images = pdf_bytes_to_png_pages(b, zoom=2.0)
+                        page_images = pdf_bytes_to_png_pages(
+                            b,
+                            zoom=2.0,
+                            max_pages=page_budget,
+                        )
                         logger.info(
                             "pdf 이미지 변환 완료",
-                            extra=_log_extra(state, doc_filename=filename, page_count=len(page_images)),
+                            extra=_log_extra(
+                                state,
+                                doc_filename=filename,
+                                page_count=len(page_images),
+                                page_limit=page_budget,
+                            ),
                         )
                     except Exception as e:
                         raise RuntimeError("UNPROCESSABLE_DOCUMENT") from e
@@ -224,6 +247,8 @@ class EasyContractService:
                             extra=_log_extra(state, doc_filename=filename, page=i, text_length=len(text)),
                         )
                         pages_text.append({"doc_type": doc_type, "file": filename, "page": i, "text": text})
+                        if doc_type in remaining_pages_by_doc_type:
+                            remaining_pages_by_doc_type[doc_type] = max(0, remaining_pages_by_doc_type[doc_type] - 1)
                 else:
                     _check_cancel(state)
                     logger.info("문자 인식 요청", extra=_log_extra(state, doc_filename=filename, page=1))
@@ -238,6 +263,8 @@ class EasyContractService:
                         extra=_log_extra(state, doc_filename=filename, page=1, text_length=len(text)),
                     )
                     pages_text.append({"doc_type": doc_type, "file": filename, "page": 1, "text": text})
+                    if doc_type in remaining_pages_by_doc_type:
+                        remaining_pages_by_doc_type[doc_type] = max(0, remaining_pages_by_doc_type[doc_type] - 1)
 
             return {"pages_text": pages_text}
 
