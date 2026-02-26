@@ -13,11 +13,11 @@ from app.resources.ocr.upstage_client import UpstageDocumentParseClient
 from app.resources.rabbitmq.client import QueueBinding, RabbitMQClient
 from app.resources.rabbitmq.result_publisher import RabbitMQResultPublisher
 from app.resources.vllm.client import VLLMClient
-from app.settings import settings
 from app.services.callback_service import CallbackService
 from app.services.cancel_registry import CancelRegistry
 from app.services.checklist_service import ChecklistService
 from app.services.easy_contract_service import EasyContractService
+from app.settings import settings
 from app.workers.handlers.checklist_handler import ChecklistMessageHandler
 from app.workers.handlers.easy_contract_cancel_handler import EasyContractCancelMessageHandler
 from app.workers.handlers.easy_contract_handler import EasyContractMessageHandler
@@ -102,6 +102,8 @@ async def create_container() -> AppContainer:
         base_url=settings.VLLM_BASE_URL,
         api_key=settings.VLLM_API_KEY,
         model=settings.VLLM_MODEL,
+        retry_max_attempts=settings.EXTERNAL_RETRY_MAX_ATTEMPTS,
+        retry_backoff_base_sec=settings.EXTERNAL_RETRY_BACKOFF_BASE_SEC,
     )
 
     ocr_limiter = AsyncLimiter(1, time_period=2)
@@ -110,6 +112,8 @@ async def create_container() -> AppContainer:
         api_key=settings.UPSTAGE_API_KEY,
         url=settings.UPSTAGE_DOCUMENT_PARSE_URL,
         limiter=ocr_limiter,
+        retry_max_attempts=settings.EXTERNAL_RETRY_MAX_ATTEMPTS,
+        retry_backoff_base_sec=settings.EXTERNAL_RETRY_BACKOFF_BASE_SEC,
     )
 
     callback = CallbackService(
@@ -182,6 +186,9 @@ async def create_container() -> AppContainer:
             easy_contract_handler=easy_contract_handler.handle,
             checklist_handler=checklist_handler.handle,
             easy_contract_cancel_handler=easy_contract_cancel_handler.handle,
+            result_publisher=rabbitmq_result_publisher,
+            retry_max_attempts=settings.WORKER_RETRY_MAX_ATTEMPTS,
+            retry_backoff_base_sec=settings.WORKER_RETRY_BACKOFF_BASE_SEC,
         )
 
     return AppContainer(

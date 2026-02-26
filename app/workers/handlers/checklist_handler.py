@@ -4,9 +4,11 @@ import logging
 
 from aio_pika.abc import AbstractIncomingMessage
 
+from app.core.errors import ExternalServiceRetryExhausted
 from app.resources.rabbitmq.codec import decode_json_message, now_utc_iso, parse_checklist_request
 from app.resources.rabbitmq.result_publisher import RabbitMQResultPublisher
 from app.services.checklist_service import ChecklistService
+from app.utils.error_messages import format_task_error
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,7 @@ class ChecklistMessageHandler:
         member_id = -1
         success = False
         checklists: list[str] = []
-        error_message: str | None = "체크리스트 생성 중 오류가 발생했습니다."
+        error_message: str | None = "체크리스트 생성에 실패했습니다."
 
         logger.info(
             "체크리스트 요청 메시지 수신",
@@ -57,9 +59,14 @@ class ChecklistMessageHandler:
         except ValueError as exc:
             success = False
             checklists = []
+            error_message = format_task_error("체크리스트 생성", exc)
+        except ExternalServiceRetryExhausted as exc:
+            success = False
+            checklists = []
             error_message = str(exc)
         except Exception:
             logger.exception("체크리스트 메시지 처리 실패")
+            raise
 
         publish_ok = await self._publish_result(
             correlation_id=correlation_id,

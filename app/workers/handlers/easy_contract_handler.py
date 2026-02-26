@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 from aio_pika.abc import AbstractIncomingMessage
 
+from app.core.errors import ExternalServiceRetryExhausted
 from app.resources.rabbitmq.codec import (
     decode_json_message,
     now_utc_iso,
@@ -20,6 +21,7 @@ from app.services.easy_contract_service import (
     EasyContractService,
     NotLeaseContract,
 )
+from app.utils.error_messages import format_task_error
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +46,7 @@ class EasyContractMessageHandler:
         member_id = -1
         success = False
         content: str | None = None
-        error_message: str | None = "쉬운 계약서 생성 중 오류가 발생했습니다."
+        error_message: str | None = "쉬운 계약서 생성에 실패했습니다."
         cancelled = False
 
         logger.info(
@@ -112,9 +114,14 @@ class EasyContractMessageHandler:
         except ValueError as exc:
             success = False
             content = None
+            error_message = format_task_error("쉬운 계약서 생성", exc)
+        except ExternalServiceRetryExhausted as exc:
+            success = False
+            content = None
             error_message = str(exc)
         except Exception:
             logger.exception("쉬운 계약서 메시지 처리 실패")
+            raise
 
         if easy_contract_id >= 0 and self.cancel_registry.is_cancelled(easy_contract_id):
             cancelled = True
@@ -240,8 +247,15 @@ class EasyContractMessageHandler:
             res = await self.http.get(url)
             res.raise_for_status()
             return res.content
-        except httpx.HTTPError as exc:
-            raise ValueError("파일 다운로드에 실패했습니다.") from exc
+        except httpx.TimeoutException as exc:
+            raise ValueError("파일 다운로드 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.") from exc
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else "unknown"
+            raise ValueError(f"파일 다운로드 실패: 파일 서버가 HTTP {status}를 반환했습니다.") from exc
+        except httpx.ConnectError as exc:
+            raise ValueError("파일 다운로드 실패: 파일 서버에 연결할 수 없습니다.") from exc
+        except httpx.RequestError as exc:
+            raise ValueError("파일 다운로드 중 네트워크 오류가 발생했습니다.") from exc
 
     def _filename_from_url(self, url: str) -> str:
         return Path(urlparse(url).path).name
