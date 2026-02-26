@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -44,7 +43,6 @@ class RabbitMQWorker:
         self.retry_max_attempts = max(1, retry_max_attempts)
         self.retry_backoff_base_sec = max(retry_backoff_base_sec, 0.0)
         self._consumer_tags: dict[str, str] = {}
-        self._retry_attempts: dict[str, int] = {}
         self._started = False
 
     async def start(self) -> None:
@@ -83,76 +81,51 @@ class RabbitMQWorker:
 
     def _wrap_handler(self, handler: MessageHandler, *, queue_name: str) -> MessageHandler:
         async def wrapped(message: AbstractIncomingMessage) -> None:
-            retry_key = self._build_retry_key(queue_name=queue_name, message=message)
-            try:
-                await handler(message)
-                self._retry_attempts.pop(retry_key, None)
-            except Exception as exc:
-                logger.exception("메시지 핸들러 처리 중 예외 발생", extra={"queue": queue_name})
-                attempt = self._next_attempt(queue_name=queue_name, message=message, retry_key=retry_key)
-                if attempt <= self.retry_max_attempts and not message.processed:
-                    backoff_sec = self.retry_backoff_base_sec * (2 ** (attempt - 1))
-                    if backoff_sec > 0:
-                        await asyncio.sleep(backoff_sec)
-                    try:
-                        await message.nack(requeue=True)
-                    except Exception:
-                        logger.exception(
-                            "메시지 재큐(requeue) 실패",
-                            extra={"queue": queue_name, "attempt": attempt},
-                        )
-                    return
-
-                self._retry_attempts.pop(retry_key, None)
-                terminal_exc = RuntimeError(
-                    f"내부 처리 오류 재시도 {self.retry_max_attempts}회 초과: {exc}"
-                )
-                publish_ok = await self._publish_fallback_error(
-                    queue_name=queue_name,
-                    message=message,
-                    exc=terminal_exc,
-                )
-                if message.processed:
-                    return
+            last_exc: Exception | None = None
+            for attempt in range(1, self.retry_max_attempts + 1):
                 try:
-                    if publish_ok:
-                        await message.ack()
-                    else:
-                        await message.nack(requeue=True)
-                except Exception:
+                    await handler(message)
+                    return
+                except Exception as exc:
+                    last_exc = exc
                     logger.exception(
-                        "메시지 ack/nack 처리 실패",
-                        extra={"queue": queue_name, "fallback_publish_ok": publish_ok},
+                        "메시지 핸들러 처리 중 예외 발생",
+                        extra={
+                            "queue": queue_name,
+                            "attempt": attempt,
+                            "max_attempts": self.retry_max_attempts,
+                        },
                     )
+                    if message.processed:
+                        return
+                    if attempt < self.retry_max_attempts:
+                        backoff_sec = self.retry_backoff_base_sec * (2 ** (attempt - 1))
+                        if backoff_sec > 0:
+                            await asyncio.sleep(backoff_sec)
+                        continue
+
+            terminal_exc = RuntimeError(
+                f"내부 처리 오류 재시도 {self.retry_max_attempts}회 초과: {last_exc}"
+            )
+            publish_ok = await self._publish_fallback_error(
+                queue_name=queue_name,
+                message=message,
+                exc=terminal_exc,
+            )
+            if message.processed:
+                return
+            try:
+                if publish_ok:
+                    await message.ack()
+                else:
+                    await message.nack(requeue=False)
+            except Exception:
+                logger.exception(
+                    "메시지 ack/nack 처리 실패",
+                    extra={"queue": queue_name, "fallback_publish_ok": publish_ok},
+                )
 
         return wrapped
-
-    def _next_attempt(self, *, queue_name: str, message: AbstractIncomingMessage, retry_key: str) -> int:
-        header_attempt = self._delivery_attempt_from_headers(message)
-        local_attempt = self._retry_attempts.get(retry_key, 0) + 1
-        attempt = max(header_attempt, local_attempt)
-        self._retry_attempts[retry_key] = attempt
-        logger.warning(
-            "메시지 처리 실패 재시도 예정",
-            extra={"queue": queue_name, "attempt": attempt, "max_attempts": self.retry_max_attempts},
-        )
-        return attempt
-
-    def _build_retry_key(self, *, queue_name: str, message: AbstractIncomingMessage) -> str:
-        if message.message_id:
-            return f"{queue_name}:msgid:{message.message_id}"
-        if message.correlation_id:
-            return f"{queue_name}:corr:{message.correlation_id}"
-        digest = hashlib.sha1(message.body).hexdigest()
-        return f"{queue_name}:body:{digest}"
-
-    def _delivery_attempt_from_headers(self, message: AbstractIncomingMessage) -> int:
-        headers = message.headers or {}
-        value = headers.get("x-delivery-count")
-        if isinstance(value, int):
-            # quorum queue 기준 x-delivery-count는 0부터 시작하므로 1-based attempt로 환산
-            return max(1, value + 1)
-        return 1
 
     async def _publish_fallback_error(
         self,
