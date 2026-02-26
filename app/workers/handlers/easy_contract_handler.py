@@ -8,10 +8,18 @@ from urllib.parse import urlparse
 import httpx
 from aio_pika.abc import AbstractIncomingMessage
 
-from app.resources.rabbitmq.codec import decode_json_message, now_utc_iso, parse_easy_contract_request
+from app.resources.rabbitmq.codec import (
+    decode_json_message,
+    now_utc_iso,
+    parse_easy_contract_request,
+)
 from app.resources.rabbitmq.result_publisher import RabbitMQResultPublisher
 from app.services.cancel_registry import CancelRegistry
-from app.services.easy_contract_service import EasyContractCancelled, EasyContractService
+from app.services.easy_contract_service import (
+    EasyContractCancelled,
+    EasyContractService,
+    NotLeaseContract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +105,10 @@ class EasyContractMessageHandler:
 
         except EasyContractCancelled:
             cancelled = True
+        except NotLeaseContract as exc:
+            success = False
+            content = None
+            error_message = str(exc)
         except ValueError as exc:
             success = False
             content = None
