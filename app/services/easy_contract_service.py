@@ -47,7 +47,7 @@ class EasyContractState(TypedDict, total=False):
     docs: list[dict[str, Any]]  # {"filename": str, "bytes": bytes, "doc_type": str}
 
     # OCR 결과
-    pages_text: Annotated[list[dict[str, Any]], list_concat]  # {"doc_type","file","page","text"}
+    pages_text: list[dict[str, Any]]  # {"doc_type","file","page","text"}
 
     # 문서 종류별 요약 결과
     contract_page_summaries: Annotated[list[dict[str, Any]], list_concat]
@@ -292,7 +292,7 @@ class EasyContractService:
                     max_tokens=1024,
                     model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
                 )
-                logger.debug(
+                logger.info(
                     "계약서 페이지 요약 완료",
                     extra=_log_extra(
                         state,
@@ -378,7 +378,7 @@ class EasyContractService:
                     max_tokens=1024,
                     model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
                 )
-                logger.debug(
+                logger.info(
                     "등기부등본 요약 완료",
                     extra=_log_extra(state, doc_filename=filename, summary_length=len(summary)),
                 )
