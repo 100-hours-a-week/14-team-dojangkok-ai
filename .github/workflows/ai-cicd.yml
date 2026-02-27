@@ -265,6 +265,14 @@ jobs:
           echo "  sourceImage=$SOURCE_IMAGE → $IMAGE_FLAG"
           echo "  subnet=$SUBNET, sa=$SA_EMAIL, tags=$TAGS"
 
+          # 동일 이름의 템플릿이 이미 존재하면 삭제 (이전 실패 실행의 잔여물)
+          if gcloud compute instance-templates describe "$NEW_TEMPLATE" \
+            --project=${{ secrets.GCP_PROJECT_ID }} &>/dev/null; then
+            echo "Template $NEW_TEMPLATE already exists, deleting..."
+            gcloud compute instance-templates delete "$NEW_TEMPLATE" \
+              --project=${{ secrets.GCP_PROJECT_ID }} --quiet
+          fi
+
           gcloud compute instance-templates create "$NEW_TEMPLATE" \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --machine-type="$MACHINE_TYPE" \
