@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from typing import Annotated, Any, TypedDict
+from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
 from app.resources.ocr.upstage_client import UpstageDocumentParseClient
 from app.resources.rabbitmq.codec import now_utc_iso
+from app.resources.vectorstore import ChromaVectorStore
 from app.resources.vllm.client import VLLMClient
 from app.settings import settings
 from app.utils.lease_contract_guard import check_is_lease_contract
@@ -41,6 +43,7 @@ def list_concat(left: Any, right: Any):
 class EasyContractState(TypedDict, total=False):
     easy_contract_id: int
     correlation_id: str
+    ingest_id: str
     is_cancelled: Callable[[int], bool]
 
     # 입력 파일들(각각 bytes + doc_type)
@@ -164,9 +167,15 @@ def _final_markdown_prompt(page_summaries: list[dict[str, Any]]) -> list[dict[st
 
 
 class EasyContractService:
-    def __init__(self, vllm: VLLMClient, ocr: UpstageDocumentParseClient):
+    def __init__(
+        self,
+        vllm: VLLMClient,
+        ocr: UpstageDocumentParseClient,
+        vector_store: ChromaVectorStore | None = None,
+    ):
         self.vllm = vllm
         self.ocr = ocr
+        self.vector_store = vector_store
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -343,6 +352,21 @@ class EasyContractService:
 
             return {"pages_text": sanitized_pages_text}
 
+        def persist_ocr_stage(state: EasyContractState) -> EasyContractState:
+            if self.vector_store is None:
+                return {}
+            try:
+                inserted = self.vector_store.upsert_easy_contract_ocr(
+                    easy_contract_id=state.get("easy_contract_id", -1),
+                    pages_text=state.get("pages_text", []),
+                    correlation_id=state.get("correlation_id"),
+                    ingest_id=state.get("ingest_id", "unknown"),
+                )
+                logger.info("OCR 벡터 저장 완료", extra=_log_extra(state, inserted=inserted))
+            except Exception:
+                logger.exception("OCR 벡터 저장 실패", extra=_log_extra(state))
+            return {}
+
         async def registry_summarize_stage(state: EasyContractState) -> EasyContractState:
             logger.info("등기부등본 요약 시작", extra=_log_extra(state))
             summaries: list[dict[str, Any]] = []
@@ -404,11 +428,23 @@ class EasyContractService:
             logger.info("쉬운계약서 생성 완료", extra=_log_extra(state))
             markdown = md.strip()
             logger.debug("마크다운 생성 완료", extra=_log_extra(state, length=len(markdown)))
+            if self.vector_store is not None and markdown:
+                try:
+                    inserted = self.vector_store.upsert_easy_contract_markdown(
+                        easy_contract_id=state.get("easy_contract_id", -1),
+                        markdown=markdown,
+                        correlation_id=state.get("correlation_id"),
+                        ingest_id=state.get("ingest_id", "unknown"),
+                    )
+                    logger.info("쉬운계약서 벡터 저장 완료", extra=_log_extra(state, inserted=inserted))
+                except Exception:
+                    logger.exception("쉬운계약서 벡터 저장 실패", extra=_log_extra(state))
             return {"markdown": markdown}
 
         # ---- graph wiring ----
         g.add_node("ocr", ocr_stage)
         g.add_node("sanitize_and_guard", sanitize_and_guard_stage)
+        g.add_node("persist_ocr", persist_ocr_stage)
         g.add_node("contract_page_summarize", contract_page_summarize_stage)
         g.add_node("registry_summarize", registry_summarize_stage)
         g.add_node("merge_summaries", merge_summaries_stage)
@@ -418,8 +454,9 @@ class EasyContractService:
 
         # guard + sanitize 이후 fan-out (병렬)
         g.add_edge("ocr", "sanitize_and_guard")
-        g.add_edge("sanitize_and_guard", "contract_page_summarize")
-        g.add_edge("sanitize_and_guard", "registry_summarize")
+        g.add_edge("sanitize_and_guard", "persist_ocr")
+        g.add_edge("persist_ocr", "contract_page_summarize")
+        g.add_edge("persist_ocr", "registry_summarize")
 
         # join
         g.add_edge(["contract_page_summarize", "registry_summarize"], "merge_summaries")
@@ -449,6 +486,7 @@ class EasyContractService:
 
         state: EasyContractState = {
             "easy_contract_id": easy_contract_id,
+            "ingest_id": correlation_id or f"{easy_contract_id}:{uuid4().hex}",
             "docs": normalized_docs,
             "pages_text": [],
             "contract_page_summaries": [],

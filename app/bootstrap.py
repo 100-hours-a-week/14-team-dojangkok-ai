@@ -12,9 +12,11 @@ from app.resources.http.client import create_async_http_client
 from app.resources.ocr.upstage_client import UpstageDocumentParseClient
 from app.resources.rabbitmq.client import QueueBinding, RabbitMQClient
 from app.resources.rabbitmq.result_publisher import RabbitMQResultPublisher
+from app.resources.vectorstore import ChromaVectorStore
 from app.resources.vllm.client import VLLMClient
 from app.services.callback_service import CallbackService
 from app.services.cancel_registry import CancelRegistry
+from app.services.chat_service import ChatService
 from app.services.checklist_service import ChecklistService
 from app.services.easy_contract_service import EasyContractService
 from app.settings import settings
@@ -31,9 +33,11 @@ class AppContainer:
     http: httpx.AsyncClient
     vllm: VLLMClient
     callback: CallbackService
+    chat_service: ChatService
     checklist_service: ChecklistService
     easy_contract_service: EasyContractService
     upstage: UpstageDocumentParseClient
+    vector_store: ChromaVectorStore | None = None
     rabbitmq_client: RabbitMQClient | None = None
     rabbitmq_result_publisher: RabbitMQResultPublisher | None = None
     rabbitmq_bindings: list[QueueBinding] = field(default_factory=list)
@@ -122,8 +126,23 @@ async def create_container() -> AppContainer:
         token=settings.BACKEND_INTERNAL_TOKEN,
     )
 
+    vector_store: ChromaVectorStore | None = None
+    try:
+        vector_store = ChromaVectorStore(
+            mode=settings.VECTOR_DB_MODE,
+            persist_dir=settings.VECTOR_DB_DIR,
+            host=settings.VECTOR_DB_HOST,
+            port=settings.VECTOR_DB_PORT,
+            contract_collection_name=settings.VECTOR_DB_COLLECTION_CONTRACT,
+            corpus_collection_name=settings.VECTOR_DB_COLLECTION_CORPUS,
+            embedding_model=settings.EMBEDDING_MODEL,
+        )
+    except Exception:
+        logger.exception("벡터스토어 초기화 실패")
+
+    chat_service = ChatService(vllm=vllm, vector_store=vector_store)
     checklist_service = ChecklistService(vllm=vllm)
-    easy_contract_service = EasyContractService(vllm=vllm, ocr=upstage)
+    easy_contract_service = EasyContractService(vllm=vllm, ocr=upstage, vector_store=vector_store)
 
     rabbitmq_client: RabbitMQClient | None = None
     rabbitmq_result_publisher: RabbitMQResultPublisher | None = None
@@ -195,9 +214,11 @@ async def create_container() -> AppContainer:
         http=http,
         vllm=vllm,
         callback=callback,
+        chat_service=chat_service,
         checklist_service=checklist_service,
         easy_contract_service=easy_contract_service,
         upstage=upstage,
+        vector_store=vector_store,
         rabbitmq_client=rabbitmq_client,
         rabbitmq_result_publisher=rabbitmq_result_publisher,
         rabbitmq_bindings=rabbitmq_bindings,

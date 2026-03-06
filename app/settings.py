@@ -60,4 +60,13 @@ class Settings:
     EASY_CONTRACT_CANCEL_TTL_SEC: int = int(os.getenv("EASY_CONTRACT_CANCEL_TTL_SEC", "3600"))
     EASY_CONTRACT_CANCEL_CLEANUP_INTERVAL_SEC: int = int(os.getenv("EASY_CONTRACT_CANCEL_CLEANUP_INTERVAL_SEC", "60"))
 
+    VECTOR_DB_MODE: str = os.getenv("VECTOR_DB_MODE", "local")
+    VECTOR_DB_DIR: str = os.getenv("VECTOR_DB_DIR", "vector_db/chroma")
+    VECTOR_DB_HOST: str = os.getenv("VECTOR_DB_HOST", "localhost")
+    VECTOR_DB_PORT: int = int(os.getenv("VECTOR_DB_PORT", "8000"))
+    VECTOR_DB_COLLECTION_CONTRACT: str = os.getenv("VECTOR_DB_COLLECTION_CONTRACT", "contract_docs")
+    VECTOR_DB_COLLECTION_CORPUS: str = os.getenv("VECTOR_DB_COLLECTION_CORPUS", "dispute_cases")
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    CORPUS_JSONL_PATH: str = os.getenv("CORPUS_JSONL_PATH", "corpus_data/corpus.jsonl")
+
 settings = Settings()

@@ -146,7 +146,7 @@ async def create_easy_contract_sync(
     docs = await _read_docs(files, doc_types)
 
     try:
-        md = await container.easy_contract_service.generate(case_id=-1, docs=docs)
+        md = await container.easy_contract_service.generate(easy_contract_id=-1, docs=docs)
         if not md.strip():
             raise HTTPException(
                 status_code=500,
@@ -210,7 +210,7 @@ async def create_easy_contract(
             saved_paths.append(stored_path)
             docs.append({"filename": filename, "bytes": b, "doc_type": meta.doc_type})
 
-        md = await container.easy_contract_service.generate(case_id=id, docs=docs)
+        md = await container.easy_contract_service.generate(easy_contract_id=id, docs=docs)
         if not md.strip():
             raise HTTPException(
                 status_code=500,

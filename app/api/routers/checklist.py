@@ -27,13 +27,13 @@ async def create_checklists_sync(
             },
         )
 
-    checklists = await container.checklist_service.generate(case_id="sync_test", keywords=keywords)
+    checklists = await container.checklist_service.generate(template_id="sync_test", keywords=keywords)
     return ChecklistSyncResponse(checklists=checklists)
 
 
 async def _run_checklist_and_callback(container, case_id: str, keywords: list[str]):
     try:
-        checklists = await container.checklist_service.generate(case_id, keywords)
+        checklists = await container.checklist_service.generate(template_id=case_id, keywords=keywords)
         await container.callback.post_checklist_complete(case_id, {"checklists": checklists})
     except Exception:
         try:
