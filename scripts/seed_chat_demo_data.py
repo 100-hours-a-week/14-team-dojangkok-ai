@@ -3,6 +3,11 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from app.resources.vectorstore import ChromaVectorStore
 from app.settings import settings
@@ -24,6 +29,21 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _resolve_corpus_jsonl_path(raw_path: str) -> str:
+    given = Path(raw_path)
+    if given.exists():
+        return str(given)
+
+    fallback = ROOT_DIR / "data" / "corpus.jsonl"
+    if fallback.exists():
+        logger.info(
+            "기본 코퍼스 경로를 찾지 못해 data/corpus.jsonl을 사용합니다",
+            extra={"requested_path": str(given), "fallback_path": str(fallback)},
+        )
+        return str(fallback)
+    return str(given)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = _parser().parse_args()
@@ -39,7 +59,8 @@ def main() -> int:
     )
 
     if _bool(args.load_corpus):
-        inserted = store.ensure_corpus_loaded(corpus_jsonl_path=args.corpus_jsonl_path)
+        corpus_jsonl_path = _resolve_corpus_jsonl_path(args.corpus_jsonl_path)
+        inserted = store.ensure_corpus_loaded(corpus_jsonl_path=corpus_jsonl_path)
         logger.info("corpus loaded", extra={"inserted": inserted})
 
     easy_contract_id = args.easy_contract_id

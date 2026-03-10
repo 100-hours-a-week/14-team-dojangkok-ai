@@ -137,6 +137,14 @@ async def create_container() -> AppContainer:
             corpus_collection_name=settings.VECTOR_DB_COLLECTION_CORPUS,
             embedding_model=settings.EMBEDDING_MODEL,
         )
+        try:
+            inserted = vector_store.ensure_corpus_loaded(corpus_jsonl_path=settings.CORPUS_JSONL_PATH)
+            logger.info(
+                "분쟁사례 코퍼스 준비 완료",
+                extra={"inserted": inserted, "path": settings.CORPUS_JSONL_PATH},
+            )
+        except Exception:
+            logger.exception("분쟁사례 코퍼스 자동 적재 실패", extra={"path": settings.CORPUS_JSONL_PATH})
     except Exception:
         logger.exception("벡터스토어 초기화 실패")
 

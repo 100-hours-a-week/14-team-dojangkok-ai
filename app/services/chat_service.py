@@ -133,3 +133,16 @@ class ChatService:
             )
             if text:
                 yield text
+
+    async def answer(
+        self,
+        *,
+        messages: list[dict[str, str]],
+    ) -> str:
+        text = await self.vllm.chat(
+            messages,
+            temperature=0.2,
+            max_tokens=1024,
+            model=settings.VLLM_MODEL,
+        )
+        return text.strip()
