@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
 def _sse_event(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @router.post("/{easy_contract_id}/stream")
@@ -49,34 +49,17 @@ async def stream_chat(
         ) from exc
 
     async def event_stream():
-        yield _sse_event(
-            "meta",
-            {
-                "easy_contract_id": easy_contract_id,
-                "contract_hits": context["contract_hits"],
-                "corpus_hits": context["corpus_hits"],
-            },
-        )
         try:
             if not body.stream:
                 text = await container.chat_service.answer(messages=context["messages"])
-                yield _sse_event(
-                    "done",
-                    {
-                        "ok": True,
-                        "easy_contract_id": easy_contract_id,
-                        "contract_hits": context["contract_hits"],
-                        "corpus_hits": context["corpus_hits"],
-                        "text": text,
-                    },
-                )
+                yield _sse_event("done", {"text": text, "done": True})
                 return
 
             async for token in container.chat_service.stream_answer(messages=context["messages"]):
-                yield _sse_event("token", {"text": token})
-            yield _sse_event("done", {"ok": True})
+                yield _sse_event("token", {"text": token, "done": False})
+            yield _sse_event("done", {"text": "", "done": True})
         except Exception as exc:
-            yield _sse_event("error", {"message": str(exc)})
+            yield _sse_event("error", {"text": str(exc), "done": True})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
