@@ -5,7 +5,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_container
+from app.api.deps import get_container, verify_backend_token
 from app.api.schemas.chat import ChatRequest
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -19,6 +19,7 @@ def _sse_event(event: str, data: dict) -> str:
 async def stream_chat(
     body: ChatRequest,
     easy_contract_id: int = Path(..., description="쉬운계약서 식별자(int)"),
+    _: None = Depends(verify_backend_token),
     container=Depends(get_container),
 ):
     question = (body.question or "").strip()
@@ -84,6 +85,7 @@ async def stream_chat(
 async def chat_once(
     body: ChatRequest,
     easy_contract_id: int = Path(..., description="쉬운계약서 식별자(int)"),
+    _: None = Depends(verify_backend_token),
     container=Depends(get_container),
 ):
     question = (body.question or "").strip()
