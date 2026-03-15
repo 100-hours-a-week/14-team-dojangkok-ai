@@ -125,6 +125,7 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+    environment: 3-v3-${{ inputs.environment }}
     steps:
       - name: Checkout Cloud Repository
         uses: actions/checkout@v6
