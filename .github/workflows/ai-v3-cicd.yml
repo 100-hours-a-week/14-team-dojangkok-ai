@@ -72,6 +72,7 @@ jobs:
   # ──────────────────────────────────────────────
   build-and-push:
     needs: test
+    if: always()
     runs-on: ubuntu-latest
     environment: 3-v3-${{ inputs.environment }}
     outputs:
@@ -124,6 +125,7 @@ jobs:
   # ──────────────────────────────────────────────
   deploy:
     needs: build-and-push
+    if: needs.build-and-push.result == 'success'
     runs-on: ubuntu-latest
     environment: 3-v3-${{ inputs.environment }}
     steps:
