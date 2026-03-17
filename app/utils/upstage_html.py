@@ -24,6 +24,9 @@ def table_to_text(table_tag) -> str:
 
 def html_to_plain_text(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
+
+    for img in soup.find_all("img"):
+        img.decompose()
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
