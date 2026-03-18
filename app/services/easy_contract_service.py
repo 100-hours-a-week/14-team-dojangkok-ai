@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from typing import Annotated, Any, TypedDict
+from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
 from app.resources.ocr.upstage_client import UpstageDocumentParseClient
 from app.resources.rabbitmq.codec import now_utc_iso
+from app.resources.vectorstore import ChromaVectorStore
 from app.resources.vllm.client import VLLMClient
 from app.settings import settings
 from app.utils.lease_contract_guard import check_is_lease_contract
@@ -41,6 +43,7 @@ def list_concat(left: Any, right: Any):
 class EasyContractState(TypedDict, total=False):
     easy_contract_id: int
     correlation_id: str
+    ingest_id: str
     is_cancelled: Callable[[int], bool]
 
     # 입력 파일들(각각 bytes + doc_type)
@@ -58,6 +61,12 @@ class EasyContractState(TypedDict, total=False):
 
     # 최종 쉬운계약서(마크다운)
     markdown: str
+
+
+class EasyContractResult(TypedDict):
+    markdown: str
+    pages_text: list[dict[str, Any]]
+    page_summaries: list[dict[str, Any]]
 
 
 def _normalize_doc_type(doc_type: Any) -> str:
@@ -113,6 +122,32 @@ def _trim_registry_text(text: str, limit: int = 40000) -> str:
     return text[:head_len] + "\n\n...(중간 일부 생략)...\n\n" + text[-tail_len:]
 
 
+def _prepare_text_for_llm(text: str, *, max_chars: int) -> str:
+    """Reduce OCR duplication noise before sending text to LLM."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return raw[:max_chars]
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        # Normalize for duplicate detection while keeping original line content.
+        key = " ".join(line.split()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(line)
+
+    cleaned = "\n".join(deduped).strip()
+    if not cleaned:
+        cleaned = raw
+    return cleaned[:max_chars]
+
+
 def _final_markdown_prompt(page_summaries: list[dict[str, Any]]) -> list[dict[str, str]]:
     system = (
         "너는 주택 임대차 계약서를 쉽게 풀어서 설명하고 분석해서 마크다운으로 출력하는 도우미다.\n"
@@ -164,9 +199,15 @@ def _final_markdown_prompt(page_summaries: list[dict[str, Any]]) -> list[dict[st
 
 
 class EasyContractService:
-    def __init__(self, vllm: VLLMClient, ocr: UpstageDocumentParseClient):
+    def __init__(
+        self,
+        vllm: VLLMClient,
+        ocr: UpstageDocumentParseClient,
+        vector_store: ChromaVectorStore | None = None,
+    ):
         self.vllm = vllm
         self.ocr = ocr
+        self.vector_store = vector_store
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -188,6 +229,35 @@ class EasyContractService:
             }
             extra.update(kwargs)
             return extra
+
+        def _persist_ocr_page_realtime(state: EasyContractState, page: dict[str, Any]) -> None:
+            if self.vector_store is None:
+                return
+            try:
+                inserted = self.vector_store.upsert_easy_contract_ocr(
+                    easy_contract_id=state.get("easy_contract_id", -1),
+                    pages_text=[page],
+                    correlation_id=state.get("correlation_id"),
+                    ingest_id=state.get("ingest_id", "unknown"),
+                )
+                logger.info(
+                    "OCR 벡터 실시간 저장 완료",
+                    extra=_log_extra(
+                        state,
+                        doc_filename=page.get("file"),
+                        page=page.get("page"),
+                        inserted=inserted,
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "OCR 벡터 실시간 저장 실패",
+                    extra=_log_extra(
+                        state,
+                        doc_filename=page.get("file"),
+                        page=page.get("page"),
+                    ),
+                )
 
         async def ocr_stage(state: EasyContractState) -> EasyContractState:
             logger.info("문서 문자 인식 단계 시작", extra=_log_extra(state))
@@ -242,11 +312,19 @@ class EasyContractService:
                             extra=_log_extra(state, doc_filename=filename, page=i),
                         )
                         text = extract_plain_text_from_upstage_json(data)
+                        sanitized_text = redact_phone_and_account(text)
                         logger.debug(
                             "문자 인식 결과",
                             extra=_log_extra(state, doc_filename=filename, page=i, text_length=len(text)),
                         )
-                        pages_text.append({"doc_type": doc_type, "file": filename, "page": i, "text": text})
+                        page_payload = {
+                            "doc_type": doc_type,
+                            "file": filename,
+                            "page": i,
+                            "text": sanitized_text,
+                        }
+                        pages_text.append(page_payload)
+                        _persist_ocr_page_realtime(state, page_payload)
                         if doc_type in remaining_pages_by_doc_type:
                             remaining_pages_by_doc_type[doc_type] = max(0, remaining_pages_by_doc_type[doc_type] - 1)
                 else:
@@ -258,11 +336,19 @@ class EasyContractService:
                         extra=_log_extra(state, doc_filename=filename, page=1),
                     )
                     text = extract_plain_text_from_upstage_json(data)
+                    sanitized_text = redact_phone_and_account(text)
                     logger.debug(
                         "문자 인식 결과",
                         extra=_log_extra(state, doc_filename=filename, page=1, text_length=len(text)),
                     )
-                    pages_text.append({"doc_type": doc_type, "file": filename, "page": 1, "text": text})
+                    page_payload = {
+                        "doc_type": doc_type,
+                        "file": filename,
+                        "page": 1,
+                        "text": sanitized_text,
+                    }
+                    pages_text.append(page_payload)
+                    _persist_ocr_page_realtime(state, page_payload)
                     if doc_type in remaining_pages_by_doc_type:
                         remaining_pages_by_doc_type[doc_type] = max(0, remaining_pages_by_doc_type[doc_type] - 1)
 
@@ -281,14 +367,15 @@ class EasyContractService:
                 if not txt:
                     continue
 
-                msgs = _page_summary_prompt(p["doc_type"], p["page"], txt[:20000])
+                prepared_text = _prepare_text_for_llm(txt, max_chars=12000)
+                msgs = _page_summary_prompt(p["doc_type"], p["page"], prepared_text)
                 logger.info(
                     "계약서 페이지 요약 요청",
                     extra=_log_extra(state, doc_filename=p["file"], page=p["page"]),
                 )
                 summary = await self.vllm.chat(
                     msgs,
-                    temperature=0.2,
+                    temperature=0.0,
                     max_tokens=1024,
                     model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
                 )
@@ -343,6 +430,23 @@ class EasyContractService:
 
             return {"pages_text": sanitized_pages_text}
 
+        def persist_ocr_stage(state: EasyContractState) -> EasyContractState:
+            pages_text = state.get("pages_text", [])
+            if self.vector_store is None:
+                # LangGraph requires every node to write at least one tracked key.
+                return {"pages_text": pages_text}
+            try:
+                inserted = self.vector_store.upsert_easy_contract_ocr(
+                    easy_contract_id=state.get("easy_contract_id", -1),
+                    pages_text=pages_text,
+                    correlation_id=state.get("correlation_id"),
+                    ingest_id=state.get("ingest_id", "unknown"),
+                )
+                logger.info("OCR 벡터 저장 완료", extra=_log_extra(state, inserted=inserted))
+            except Exception:
+                logger.exception("OCR 벡터 저장 실패", extra=_log_extra(state))
+            return {"pages_text": pages_text}
+
         async def registry_summarize_stage(state: EasyContractState) -> EasyContractState:
             logger.info("등기부등본 요약 시작", extra=_log_extra(state))
             summaries: list[dict[str, Any]] = []
@@ -367,6 +471,7 @@ class EasyContractService:
                     continue
 
                 merged_text = _trim_registry_text("\n\n".join(merged_chunks))
+                merged_text = _prepare_text_for_llm(merged_text, max_chars=16000)
                 msgs = _registry_summary_prompt(filename, merged_text)
                 logger.info(
                     "등기부등본 요약 요청",
@@ -374,7 +479,7 @@ class EasyContractService:
                 )
                 summary = await self.vllm.chat(
                     msgs,
-                    temperature=0.2,
+                    temperature=0.0,
                     max_tokens=1024,
                     model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
                 )
@@ -397,18 +502,30 @@ class EasyContractService:
             logger.info("쉬운계약서 생성 요청", extra=_log_extra(state))
             md = await self.vllm.chat(
                 msgs,
-                temperature=0.2,
+                temperature=0.0,
                 max_tokens=2048,
                 model=settings.VLLM_LORA_ADAPTER_EASYCONTRACT,
             )
             logger.info("쉬운계약서 생성 완료", extra=_log_extra(state))
             markdown = md.strip()
             logger.debug("마크다운 생성 완료", extra=_log_extra(state, length=len(markdown)))
+            if self.vector_store is not None and markdown:
+                try:
+                    inserted = self.vector_store.upsert_easy_contract_markdown(
+                        easy_contract_id=state.get("easy_contract_id", -1),
+                        markdown=markdown,
+                        correlation_id=state.get("correlation_id"),
+                        ingest_id=state.get("ingest_id", "unknown"),
+                    )
+                    logger.info("쉬운계약서 벡터 저장 완료", extra=_log_extra(state, inserted=inserted))
+                except Exception:
+                    logger.exception("쉬운계약서 벡터 저장 실패", extra=_log_extra(state))
             return {"markdown": markdown}
 
         # ---- graph wiring ----
         g.add_node("ocr", ocr_stage)
         g.add_node("sanitize_and_guard", sanitize_and_guard_stage)
+        g.add_node("persist_ocr", persist_ocr_stage)
         g.add_node("contract_page_summarize", contract_page_summarize_stage)
         g.add_node("registry_summarize", registry_summarize_stage)
         g.add_node("merge_summaries", merge_summaries_stage)
@@ -418,8 +535,9 @@ class EasyContractService:
 
         # guard + sanitize 이후 fan-out (병렬)
         g.add_edge("ocr", "sanitize_and_guard")
-        g.add_edge("sanitize_and_guard", "contract_page_summarize")
-        g.add_edge("sanitize_and_guard", "registry_summarize")
+        g.add_edge("sanitize_and_guard", "persist_ocr")
+        g.add_edge("persist_ocr", "contract_page_summarize")
+        g.add_edge("persist_ocr", "registry_summarize")
 
         # join
         g.add_edge(["contract_page_summarize", "registry_summarize"], "merge_summaries")
@@ -436,6 +554,42 @@ class EasyContractService:
         correlation_id: str | None = None,
         is_cancelled: Callable[[int], bool] | None = None,
     ) -> str:
+        out = await self._run(
+            easy_contract_id=easy_contract_id,
+            docs=docs,
+            correlation_id=correlation_id,
+            is_cancelled=is_cancelled,
+        )
+        return out.get("markdown", "")
+
+    async def generate_with_details(
+        self,
+        easy_contract_id: int,
+        docs: list[dict[str, Any]],
+        *,
+        correlation_id: str | None = None,
+        is_cancelled: Callable[[int], bool] | None = None,
+    ) -> EasyContractResult:
+        out = await self._run(
+            easy_contract_id=easy_contract_id,
+            docs=docs,
+            correlation_id=correlation_id,
+            is_cancelled=is_cancelled,
+        )
+        return {
+            "markdown": out.get("markdown", ""),
+            "pages_text": out.get("pages_text", []),
+            "page_summaries": out.get("page_summaries", []),
+        }
+
+    async def _run(
+        self,
+        easy_contract_id: int,
+        docs: list[dict[str, Any]],
+        *,
+        correlation_id: str | None = None,
+        is_cancelled: Callable[[int], bool] | None = None,
+    ) -> EasyContractState:
         logger.info(
             "쉬운 계약서 생성 시작",
             extra={
@@ -449,6 +603,7 @@ class EasyContractService:
 
         state: EasyContractState = {
             "easy_contract_id": easy_contract_id,
+            "ingest_id": correlation_id or f"{easy_contract_id}:{uuid4().hex}",
             "docs": normalized_docs,
             "pages_text": [],
             "contract_page_summaries": [],
@@ -471,4 +626,4 @@ class EasyContractService:
                 "event_time": now_utc_iso(),
             },
         )
-        return out.get("markdown", "")
+        return out

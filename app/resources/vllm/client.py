@@ -1,4 +1,6 @@
 import logging
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -92,6 +94,56 @@ class VLLMClient:
                     detail=self._describe_error(retry_source),
                 ) from exc
             raise
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+        model: str | None = None,
+    ) -> AsyncIterator[str]:
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "text/event-stream",
+        }
+        payload: dict[str, Any] = {
+            "model": self._resolve_model(model),
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+
+        async with self.http.stream("POST", url, json=payload, headers=headers) as res:
+            res.raise_for_status()
+            async for line in res.aiter_lines():
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    continue
+
+                raw = line[5:].strip()
+                if not raw or raw == "[DONE]":
+                    continue
+
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+
+                choices = data.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+
+                item = choices[0] if isinstance(choices[0], dict) else {}
+                delta = item.get("delta") if isinstance(item.get("delta"), dict) else {}
+                token = delta.get("content")
+                if not token:
+                    message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                    token = message.get("content")
+                if token:
+                    yield str(token)
 
     def _resolve_model(self, model: str | None) -> str:
         if model is None:

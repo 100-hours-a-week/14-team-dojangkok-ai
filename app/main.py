@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from prometheus_fastapi_instrumentator import Instrumentator
 
+from app.api.routers.chat import router as chat_router
 from app.api.routers.checklist import router as checklist_router
 from app.api.routers.easy_contract import router as easy_contract_router
 from app.bootstrap import create_container
@@ -34,6 +35,7 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 app.include_router(checklist_router)
 app.include_router(easy_contract_router)
+app.include_router(chat_router)
 
 
 @app.get("/health")
