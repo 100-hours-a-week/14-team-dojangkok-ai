@@ -1,7 +1,7 @@
 # AI Server CI/CD Pipeline (V3 K8S - ArgoCD GitOps)
 # 위치: .github/workflows/ai-v3-cicd.yml (서비스 레포에 복사)
 #
-# 트리거: workflow_dispatch (수동) — K8S 클러스터 비상시 운용
+# 트리거: push (dev) + workflow_dispatch (수동)
 # 빌드: Python 3.10 + uv → Docker (arm64) → ECR
 # 배포: Kustomize 이미지 태그 업데이트 → cloud repo push → ArgoCD auto-sync
 #
@@ -23,6 +23,12 @@ permissions:
   contents: read
 
 on:
+  push:
+    branches: [dev]
+    paths-ignore:
+      - '.github/workflows/**'
+      - '**.md'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -74,7 +80,7 @@ jobs:
   build-and-push:
     needs: test
     runs-on: ubuntu-latest
-    environment: 3-v3-${{ inputs.environment }}
+    environment: 3-v3-${{ inputs.environment || 'dev' }}
     outputs:
       image-tag: ${{ steps.meta.outputs.tag }}
       image-name: ${{ steps.meta.outputs.name }}
@@ -86,7 +92,7 @@ jobs:
         id: meta
         run: |
           TAG="${{ github.sha }}"
-          NAME="${{ inputs.environment }}-dojangkok-${{ env.SERVICE_NAME }}"
+          NAME="${{ inputs.environment || 'dev' }}-dojangkok-${{ env.SERVICE_NAME }}"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "name=${NAME}" >> $GITHUB_OUTPUT
 
@@ -127,7 +133,7 @@ jobs:
     needs: build-and-push
     if: needs.build-and-push.result == 'success'
     runs-on: ubuntu-latest
-    environment: 3-v3-${{ inputs.environment }}
+    environment: 3-v3-${{ inputs.environment || 'dev' }}
     steps:
       - name: Checkout Cloud Repository
         uses: actions/checkout@v6
@@ -141,7 +147,7 @@ jobs:
 
       - name: Update Kustomize image tag
         run: |
-          ENV="${{ inputs.environment }}"
+          ENV="${{ inputs.environment || 'dev' }}"
           OVERLAY_DIR="k8s/apps/overlays/${ENV}"
           BASE_IMAGE="${{ env.ECR_REGISTRY }}/dev-dojangkok-${{ env.SERVICE_NAME }}"
           IMAGE_TAG="${{ needs.build-and-push.outputs.image-tag }}"
@@ -164,6 +170,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "deploy(${{ inputs.environment }}): ai-server ${{ needs.build-and-push.outputs.image-tag }}"
+          git commit -m "deploy(${{ inputs.environment || 'dev' }}): ai-server ${{ needs.build-and-push.outputs.image-tag }}"
           git pull --rebase origin ${{ env.CLOUD_BRANCH }}
           git push

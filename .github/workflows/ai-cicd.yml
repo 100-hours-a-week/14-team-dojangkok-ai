@@ -25,18 +25,6 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  push:
-    branches: [dev, main]
-    paths-ignore:
-      - '.github/workflows/**'
-      - '**.md'
-      - 'docs/**'
-  pull_request:
-    branches: [dev, main]
-    paths-ignore:
-      - '.github/workflows/**'
-      - '**.md'
-      - 'docs/**'
   workflow_dispatch:
     inputs:
       environment:
