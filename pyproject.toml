@@ -7,7 +7,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     # === FastAPI 서버 핵심 ===
-    "fastapi==0.110.0",
+    "fastapi>=0.115.9",
     "uvicorn[standard]==0.29.0",
     "httpx>=0.25.0",
     "pydantic==2.8.0",
@@ -19,9 +19,8 @@ dependencies = [
     "langchain-core==0.2.43",
     "langchain-openai==0.1.25",
     # === RAG/문서처리 ===
-    "chromadb==0.5.3",
+    "chromadb>=1.0.0",
     "fastembed>=0.3.6",
-    "langchain-chroma==0.1.4",
     "langchain-community==0.2.17",
     "langchain-text-splitters==0.2.4",
     "pymupdf==1.24.9",
